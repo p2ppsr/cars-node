@@ -318,7 +318,10 @@ spec:
               until mongosh --host shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local -u "$MONGO_ROOT_USERNAME" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 })'; do
                 sleep 10
               done
-              mongosh --host shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local -u "$MONGO_ROOT_USERNAME" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin <<'JS'
+              until getent hosts shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local >/dev/null && getent hosts shared-mongo-arbiter.cars-operator-system.svc.cluster.local >/dev/null; do
+                sleep 5
+              done
+              until mongosh --host shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local -u "$MONGO_ROOT_USERNAME" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --quiet <<'JS'
               const desiredConfig = {
                 _id: "rs0",
                 members: [
@@ -327,12 +330,37 @@ spec:
                   { _id: 2, host: "shared-mongo-arbiter.cars-operator-system.svc.cluster.local:27017", arbiterOnly: true }
                 ]
               };
-              try {
-                rs.status();
-              } catch (error) {
-                rs.initiate(desiredConfig);
+              function hasPrimary(status) {
+                return Array.isArray(status.members) && status.members.some((member) => member.stateStr === "PRIMARY");
               }
+              try {
+                const status = rs.status();
+                if (hasPrimary(status)) {
+                  quit(0);
+                }
+              } catch (error) {
+                try {
+                  rs.initiate(desiredConfig);
+                } catch (initError) {
+                  const msg = String(initError && (initError.errmsg || initError.message || initError));
+                  if (!msg.includes("already initialized")) {
+                    print(msg);
+                  }
+                }
+              }
+              try {
+                const status = rs.status();
+                if (hasPrimary(status)) {
+                  quit(0);
+                }
+                printjson(status);
+              } catch (retryError) {
+                print(String(retryError && (retryError.errmsg || retryError.message || retryError)));
+              }
+              quit(1);
               JS
+                sleep 5
+              done
           env:
             - name: MONGO_ROOT_USERNAME
               valueFrom:
