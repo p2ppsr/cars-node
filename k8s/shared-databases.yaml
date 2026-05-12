@@ -88,6 +88,26 @@ spec:
         memory: "1Gi"
     podDisruptionBudget:
       minAvailable: 1
+    affinity:
+      advanced:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - "server2"
+                      - "server3"
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: haproxy
+                    app.kubernetes.io/instance: shared-mysql
 ---
 apiVersion: v1
 kind: Secret
