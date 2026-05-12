@@ -49,7 +49,10 @@ async function main() {
 
   const namespaces = args.all ? listProjectNamespaces() : [required(args.namespace, '--namespace is required unless --all is set')];
   const discoveries = namespaces.map(discoverNamespace);
-  console.log(JSON.stringify({ mode: args.dryRun ? 'dry-run' : args.prune ? 'prune' : 'apply', projects: discoveries }, null, 2));
+  console.log(JSON.stringify({
+    mode: args.dryRun ? 'dry-run' : args.prune ? 'prune' : 'apply',
+    projects: discoveries.map(redactDiscoveryForOutput),
+  }, null, 2));
 
   if (args.dryRun) {
     return;
@@ -372,6 +375,29 @@ function isSharedUrl(url: string | undefined): boolean {
   }
   const config = getSharedDbConfig();
   return url.includes(config.mysqlAppHost) || config.mongoAppHosts.split(',').some(host => url.includes(host));
+}
+
+function redactDiscoveryForOutput(discovery: Discovery): Discovery {
+  return {
+    ...discovery,
+    knexUrl: redactUrl(discovery.knexUrl),
+    mongoUrl: redactUrl(discovery.mongoUrl),
+  };
+}
+
+function redactUrl(rawUrl: string | undefined): string | undefined {
+  if (!rawUrl) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.password) {
+      parsed.password = 'REDACTED';
+    }
+    return parsed.toString();
+  } catch {
+    return rawUrl.includes('@') ? '<redacted-url>' : rawUrl;
+  }
 }
 
 function parseMysqlUrl(rawUrl: string) {
