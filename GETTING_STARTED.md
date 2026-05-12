@@ -251,6 +251,7 @@ When prompted, provide the necessary details. Important environment values:
 - `SHARED_MYSQL_APP_HOST=shared-mysql-haproxy.cars-operator-system.svc.cluster.local`
 - `SHARED_MONGO_ADMIN_URL=mongodb://root:<password>@shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017/admin?replicaSet=rs0&authSource=admin`
 - `SHARED_MONGO_APP_HOSTS=shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017`
+- `SHARED_MONGO_ADDITIONAL_DATABASES=CARS_lookup_services` for legacy overlay lookup-service storage.
 - `MAINNET_PRIVATE_KEY` and `TESTNET_PRIVATE_KEY`: You’ll need to provide 64-char hex keys. Generate securely or use existing keys. Fund with at least 250,000 satoshis. [Use KeyFunder](https://keyfunder.babbage.systems). If testnet key funding isn't working (for now), just ignore and move on.
 - `TAAL_API_KEY_MAIN` and `TAAL_API_KEY_TEST`: Obtain from TAAL (explained in next step).
 - `K3S_TOKEN=cars-token` (generate a random token)
@@ -273,7 +274,7 @@ kubectl apply -f k8s/shared-databases.yaml
 
 Replace the `CHANGE_ME` values in the manifest first. It creates `shared-mysql` in `cars-operator-system` as a 3-pod Percona XtraDB Cluster with 2 HAProxy pods and 100Gi Longhorn volumes, plus `shared-mongo` as 2 data members and 1 arbiter with 100Gi Longhorn volumes for the data members.
 
-In shared mode, each project gets its own MySQL database, MongoDB database, and DB user/password, but no namespace-local PXC, HAProxy, MongoDB, arbiter, or DB PVCs. Set `CARS_PROJECT_DB_MODE=legacy-per-project` only if you need the older per-project database workload behavior.
+In shared mode, each project gets its own MySQL database, MongoDB database, and DB user/password, but no namespace-local PXC, HAProxy, MongoDB, arbiter, or DB PVCs. Existing lookup-service deployments may also need legacy overlay databases that are not selected by the `MONGO_URL` path; `SHARED_MONGO_ADDITIONAL_DATABASES` defaults to `CARS_lookup_services`, and the migration CLI copies those databases without renaming them. Set `CARS_PROJECT_DB_MODE=legacy-per-project` only if you need the older per-project database workload behavior.
 
 Existing projects can be inventoried and migrated procedurally:
 

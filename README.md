@@ -127,7 +127,10 @@ SHARED_MYSQL_ADMIN_URL=mysql://root:<password>@shared-mysql-haproxy.cars-operato
 SHARED_MYSQL_APP_HOST=shared-mysql-haproxy.cars-operator-system.svc.cluster.local
 SHARED_MONGO_ADMIN_URL=mongodb://root:<password>@shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017/admin?replicaSet=rs0&authSource=admin
 SHARED_MONGO_APP_HOSTS=shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017
+SHARED_MONGO_ADDITIONAL_DATABASES=CARS_lookup_services
 ```
+
+`SHARED_MONGO_ADDITIONAL_DATABASES` covers legacy overlay lookup-service databases that are not selected by the `MONGO_URL` path. It defaults to `CARS_lookup_services`; the migration CLI copies those databases without renaming them and grants the per-project Mongo user access so existing lookup services keep working after cutover.
 
 `CARS_PROJECT_DB_MODE=legacy-per-project` remains available as an escape hatch for the previous per-project MySQL/PXC and MongoDB workload behavior.
 
@@ -239,7 +242,7 @@ npm run migrate:shared-db -- --all --dry-run
 npm run migrate:shared-db -- --namespace cars-project-<project_uuid> --apply
 ```
 
-The apply flow scales the app down, provisions the target MySQL and MongoDB users/databases, runs dump/restore jobs, patches the project DB secret, restores the app deployment, labels old DB resources with `cars.bsv.io/shared-db-migrated=true`, scales old DB StatefulSets to zero, and excludes old DB resources from Velero backups. It does not delete old PVCs or DB resources. Use explicit prune only after backup, retention, and verification:
+The apply flow scales the app down, provisions the target MySQL and MongoDB users/databases, runs dump/restore jobs, also copies any `SHARED_MONGO_ADDITIONAL_DATABASES` such as `CARS_lookup_services`, patches the project DB secret, restores the app deployment, labels old DB resources with `cars.bsv.io/shared-db-migrated=true`, scales old DB StatefulSets to zero, and excludes old DB resources from Velero backups. It does not delete old PVCs or DB resources. Use explicit prune only after backup, retention, and verification:
 
 ```bash
 npm run migrate:shared-db -- --namespace cars-project-<project_uuid> --prune

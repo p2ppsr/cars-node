@@ -259,15 +259,27 @@ mysqldump -h "$SOURCE_HOST" -P "$SOURCE_PORT" -u "$SOURCE_USER" -p"$SOURCE_PASSW
 function runMongoMigrationJob(namespace: string, sourceUrl: string, targetUrl: string) {
   const sourceDb = parseMongoDbName(sourceUrl);
   const targetDb = parseMongoDbName(targetUrl);
+  const additionalDatabases = getSharedDbConfig().mongoAdditionalDatabases.filter(db => db !== targetDb);
   runJob(namespace, 'mongo', 'mongo:6.0', {
     SOURCE_MONGO_URL: sourceUrl,
     TARGET_MONGO_URL: targetUrl,
     SOURCE_DB: sourceDb,
     TARGET_DB: targetDb,
+    ADDITIONAL_DATABASES: additionalDatabases.join(','),
   }, `
 set -euo pipefail
 mongodump --uri="$SOURCE_MONGO_URL" --db="$SOURCE_DB" --excludeCollection=system.users --excludeCollection=system.version --excludeCollection=system.roles --archive |
   mongorestore --uri="$TARGET_MONGO_URL" --archive --drop --nsFrom="$SOURCE_DB.*" --nsTo="$TARGET_DB.*"
+
+if [ -n "$ADDITIONAL_DATABASES" ]; then
+  IFS=',' read -r -a EXTRA_DBS <<< "$ADDITIONAL_DATABASES"
+  for EXTRA_DB in "\${EXTRA_DBS[@]}"; do
+    [ -z "$EXTRA_DB" ] && continue
+    echo "migrating additional MongoDB database $EXTRA_DB"
+    mongodump --uri="$SOURCE_MONGO_URL" --db="$EXTRA_DB" --excludeCollection=system.users --excludeCollection=system.version --excludeCollection=system.roles --archive |
+      mongorestore --uri="$TARGET_MONGO_URL" --archive --drop --nsFrom="$EXTRA_DB.*" --nsTo="$EXTRA_DB.*"
+  done
+fi
 `);
 }
 

@@ -12,6 +12,7 @@ export interface SharedDbConfig {
   mongoAdminUrl?: string;
   mongoAppHosts: string;
   mongoReplicaSetName: string;
+  mongoAdditionalDatabases: string[];
 }
 
 export interface ProjectDbCredentials {
@@ -45,6 +46,7 @@ export function getSharedDbConfig(): SharedDbConfig {
     mongoAppHosts: process.env.SHARED_MONGO_APP_HOSTS ||
       `shared-mongo-0.shared-mongo.${namespace}.svc.cluster.local:27017,shared-mongo-1.shared-mongo.${namespace}.svc.cluster.local:27017`,
     mongoReplicaSetName,
+    mongoAdditionalDatabases: parseDatabaseList(process.env.SHARED_MONGO_ADDITIONAL_DATABASES || 'CARS_lookup_services'),
   };
 }
 
@@ -126,31 +128,63 @@ async function ensureSharedMysqlDatabase(adminUrl: string, credentials: ProjectD
 }
 
 async function ensureSharedMongoDatabase(adminUrl: string, credentials: ProjectDbCredentials): Promise<void> {
+  const config = getSharedDbConfig();
   const client = new MongoClient(adminUrl);
   await client.connect();
   try {
     const db = client.db(credentials.mongoDatabase);
-    const role = { role: 'readWrite', db: credentials.mongoDatabase };
+    const roles = mongoRoles(credentials.mongoDatabase, config.mongoAdditionalDatabases);
     try {
       await db.command({
         createUser: credentials.user,
         pwd: credentials.mongoPassword,
-        roles: [role],
+        roles,
       });
     } catch (error: any) {
       const message = `${String(error?.codeName || '')} ${String(error?.message || '')}`;
       if (!message.includes('Duplicate') && !message.includes('already exists')) {
         throw error;
       }
+      const existing = await db.command({ usersInfo: credentials.user });
       await db.command({
         updateUser: credentials.user,
         pwd: credentials.mongoPassword,
-        roles: [role],
+        roles: mergeMongoRoles(existing.users?.[0]?.roles || [], roles),
       });
     }
   } finally {
     await client.close();
   }
+}
+
+function parseDatabaseList(raw: string): string[] {
+  return raw
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean)
+    .map(value => {
+      if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+        throw new Error(`Unsafe MongoDB database name in SHARED_MONGO_ADDITIONAL_DATABASES: ${value}`);
+      }
+      return value;
+    });
+}
+
+function mongoRoles(projectDatabase: string, additionalDatabases: string[]): Array<{ role: string; db: string }> {
+  return mergeMongoRoles([], [
+    { role: 'readWrite', db: projectDatabase },
+    ...additionalDatabases.map(db => ({ role: 'readWrite', db })),
+  ]);
+}
+
+function mergeMongoRoles(existing: Array<{ role: string; db: string }>, wanted: Array<{ role: string; db: string }>): Array<{ role: string; db: string }> {
+  const merged: Array<{ role: string; db: string }> = [];
+  for (const role of [...existing, ...wanted]) {
+    if (!merged.some(item => item.role === role.role && item.db === role.db)) {
+      merged.push({ role: role.role, db: role.db });
+    }
+  }
+  return merged;
 }
 
 function assertProjectId(projectId: string): void {
