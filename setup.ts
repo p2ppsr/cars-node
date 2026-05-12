@@ -96,6 +96,57 @@ const envVars: EnvVarDefinition[] = [
         validate: (val) => val.length > 0
     },
     {
+        key: 'MYSQL_DATABASE_URL',
+        description: 'Optional direct MySQL URL for the CARS metadata database. In shared DB mode this should point at cars_db on shared-mysql-haproxy.',
+        default: '',
+        mask: true,
+        validate: (val) => val.length === 0 || val.startsWith('mysql://')
+    },
+    {
+        key: 'CARS_PROJECT_DB_MODE',
+        description: 'Project database mode. Use shared for new deployments; legacy-per-project keeps old per-project DB workloads.',
+        default: 'shared',
+        validate: (val) => val === 'shared' || val === 'legacy-per-project'
+    },
+    {
+        key: 'SHARED_DB_NAMESPACE',
+        description: 'Namespace containing shared operator-owned databases.',
+        default: 'cars-operator-system',
+        validate: (val) => val.trim().length > 0
+    },
+    {
+        key: 'SHARED_MYSQL_ADMIN_URL',
+        description: 'Admin MySQL URL used by CARS Node to create per-project databases and users.',
+        default: 'mysql://root:CHANGE_ME@shared-mysql-haproxy.cars-operator-system.svc.cluster.local:3306/mysql',
+        mask: true,
+        validate: (val) => val.length === 0 || val.startsWith('mysql://')
+    },
+    {
+        key: 'SHARED_MYSQL_APP_HOST',
+        description: 'MySQL host written into project secrets.',
+        default: 'shared-mysql-haproxy.cars-operator-system.svc.cluster.local',
+        validate: (val) => val.trim().length > 0
+    },
+    {
+        key: 'SHARED_MONGO_ADMIN_URL',
+        description: 'Admin MongoDB URL used by CARS Node to create per-project databases and users.',
+        default: 'mongodb://root:CHANGE_ME@shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017/admin?replicaSet=rs0&authSource=admin',
+        mask: true,
+        validate: (val) => val.length === 0 || val.startsWith('mongodb://')
+    },
+    {
+        key: 'SHARED_MONGO_APP_HOSTS',
+        description: 'Comma-separated MongoDB hosts written into project secrets.',
+        default: 'shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017',
+        validate: (val) => val.trim().length > 0
+    },
+    {
+        key: 'SHARED_MONGO_REPLICA_SET',
+        description: 'Shared MongoDB replica set name.',
+        default: 'rs0',
+        validate: (val) => val.trim().length > 0
+    },
+    {
         key: 'MAINNET_PRIVATE_KEY',
         description: 'The private key used for operations on Bitcoin mainnet.',
         default: '',

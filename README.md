@@ -53,11 +53,12 @@ In short, CARS Node takes your `deployment-info.json` and packaged artifacts and
 ## Key Features and Responsibilities
 
 - **Automated Kubernetes Provisioning:** CARS Node interacts with a Kubernetes cluster to schedule workloads, manage pods and services, and ensure high availability.
+- **Shared Project Databases:** New backend deployments use operator-owned shared MySQL and MongoDB clusters by default, with per-project databases and users for isolation instead of per-project database pods and PVCs.
 - **Dynamic Ingress and SSL:** Uses `ingress-nginx`, `cert-manager`, and Let’s Encrypt to automatically provision custom domains and HTTPS certificates.
 - **Billing and Resource Usage Tracking:** Integrates with Prometheus to gather CPU, memory, disk, and network usage over time, billing projects automatically.
 - **Multiple Environment Support:** Supports mainnet and testnet keys, separate private keys, and network-specific TAAL API keys for transaction broadcast, merkle proof acquisition, and double spend detection.
 - **Identity and Project Management:** Integrates with the standard BSV identity system, ensuring only authorized admins can create or manage projects.
-- **Logging and Observability:** Centralized logs in MySQL, plus direct access to cluster-level logs (frontend/backend/mongo/mysql) via `kubectl` and API endpoints.
+- **Logging and Observability:** Centralized logs in MySQL, plus direct access to cluster-level frontend/backend logs via `kubectl` and API endpoints. In shared DB mode, MySQL and MongoDB logs are operator-managed rather than exposed to project tenants.
 - **Health and Readiness Visibility:** Public system health endpoints plus project-aware health reports that inspect Kubernetes readiness, sticky routing, database topology, and backend HTTP health.
 - **Extensible Setup:** Designed for both small-scale Docker Compose-based setups and large-scale, production-grade environments.
 
@@ -67,12 +68,13 @@ In short, CARS Node takes your `deployment-info.json` and packaged artifacts and
 
 At a high level, CARS Node is an Express.js server that:
 
-- Connects to a MySQL database to store project metadata, deployments, logs, and accounting records.
+- Connects to a MySQL database, normally `cars_db` on the shared operator MySQL cluster, to store project metadata, deployments, logs, and accounting records.
 - Uses Kubernetes (k3s or a full upstream cluster) to run workloads.
 - Integrates with `prometheus`-based monitoring for billing and metrics.
 - Uses `helm` to manage deployments and `cert-manager` for SSL certificates.
 - Stores artifacts locally before building Docker images and pushing them to a registry.
 - Issues new releases by applying Helm charts dynamically constructed at runtime.
+- Provisions per-project MySQL and MongoDB databases and credentials on shared operator-owned clusters before backend releases are installed.
 
 ---
 
@@ -83,7 +85,8 @@ At a high level, CARS Node is an Express.js server that:
 - **Docker & Docker Registry:** Needed for building/pushing images. Use the integrated `registry` and `dind` in the local `docker-compose.yml`, or configure externally.
 - **Kubernetes Cluster and kubectl Access:** CARS Node expects access to a k3s or Kubernetes cluster. Again, you can use the pre-configured Rancher k3s in the Compose file, or configure your own for larger scale. The Dockerfile bundled with the code installs `kubectl`, or you can run CARS directly on machine(s) that already have it.
 - **Helm:** For deploying workloads as Helm releases. Again, present in the integrated `Dockerfile`, or you can install it yourself.
-- **MySQL Database:** Persistent storage of project state. Use the integrated Compose file, or configure your own with ENV variables.
+- **MySQL Database:** Persistent storage of CARS Node state. New production installs should put `cars_db` on the shared MySQL cluster and set `MYSQL_DATABASE_URL` accordingly. The integrated Compose file still provides a local MySQL service for development.
+- **Shared Project Databases:** Production shared mode expects the Percona PXC operator, Longhorn storage class `longhorn-replicated`, and the shared database manifests in `k8s/shared-databases.yaml`.
 - **SendGrid API Key:** For sending email notifications about billing, deployments, and admin changes. Provide it as an environmental variable or add it to a local `.env` for use with Compose.
 
 ---
@@ -96,14 +99,37 @@ CARS Node is configured via a `.env` file. Run:
 ```bash
 npm run setup
 ```
-This interactive script asks for all required environment variables, including `CARS_NODE_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MAINNET_PRIVATE_KEY`, `TESTNET_PRIVATE_KEY`, `TAAL_API_KEY_MAIN`, `TAAL_API_KEY_TEST`, `K3S_TOKEN`, `DOCKER_HOST`, `DOCKER_REGISTRY`, `PROJECT_DEPLOYMENT_DNS_NAME`, `SENDGRID_API_KEY`, and more.
+This interactive script asks for all required environment variables, including `CARS_NODE_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE_URL`, `CARS_PROJECT_DB_MODE`, `SHARED_MYSQL_ADMIN_URL`, `SHARED_MONGO_ADMIN_URL`, `MAINNET_PRIVATE_KEY`, `TESTNET_PRIVATE_KEY`, `TAAL_API_KEY_MAIN`, `TAAL_API_KEY_TEST`, `K3S_TOKEN`, `DOCKER_HOST`, `DOCKER_REGISTRY`, `PROJECT_DEPLOYMENT_DNS_NAME`, `SENDGRID_API_KEY`, and more.
 
 These variables control your server base URL, database credentials, private keys for blockchain operations, Docker registry configurations, and more. An example `.env` is provided for reference.
 
 ### Step 2: Database and Kubernetes Cluster
 
-- **Database (MySQL):** Set up a MySQL 8.0 instance. Provide credentials in `.env`.
+- **CARS Metadata Database (MySQL):** Set `MYSQL_DATABASE_URL` to the CARS metadata database. For shared production installs, this should be `cars_db` on `shared-mysql-haproxy.cars-operator-system.svc.cluster.local`.
 - **Kubernetes Cluster:** CARS Node needs a cluster. For local testing, you can run `rancher/k3s` inside Docker Compose. In production, you might connect to an existing cluster via a KUBECONFIG file.
+- **Shared Project Databases:** For new production deployments, install the shared databases first:
+
+```bash
+kubectl apply -f k8s/shared-databases.yaml
+```
+
+Before applying, replace the `CHANGE_ME` values in that manifest with generated credentials. The default deployment creates:
+
+- `shared-mysql`: a 3-pod Percona XtraDB Cluster with 2 HAProxy pods and 100Gi Longhorn-backed PXC volumes.
+- `shared-mongo`: a MongoDB replica set with 2 data-bearing members, 1 arbiter, and 100Gi Longhorn-backed data-member volumes.
+
+Then set:
+
+```bash
+CARS_PROJECT_DB_MODE=shared
+SHARED_DB_NAMESPACE=cars-operator-system
+SHARED_MYSQL_ADMIN_URL=mysql://root:<password>@shared-mysql-haproxy.cars-operator-system.svc.cluster.local:3306/mysql
+SHARED_MYSQL_APP_HOST=shared-mysql-haproxy.cars-operator-system.svc.cluster.local
+SHARED_MONGO_ADMIN_URL=mongodb://root:<password>@shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017/admin?replicaSet=rs0&authSource=admin
+SHARED_MONGO_APP_HOSTS=shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017
+```
+
+`CARS_PROJECT_DB_MODE=legacy-per-project` remains available as an escape hatch for the previous per-project MySQL/PXC and MongoDB workload behavior.
 
 ### Step 3: Running CARS Node (Small Scale with Docker Compose)
 
@@ -128,7 +154,7 @@ For larger scale or production:
 - **External Registry:** Use a secure Docker registry, configure `DOCKER_REGISTRY`.
 - **Custom Domains & SSL:** Ensure that `PROJECT_DEPLOYMENT_DNS_NAME` is a domain you control. CARS Node uses Let’s Encrypt via `cert-manager`.
 - **Prometheus & Observability:** Make sure your Prometheus endpoint is stable and reachable.
-- **High Availability:** Scale MySQL externally, run multiple CARS Node instances behind a load balancer, ensure persistent volumes for registry, etc.
+- **High Availability:** Use the shared Percona PXC and MongoDB clusters for project databases, keep CARS metadata in `cars_db` on shared MySQL, run multiple CARS Node instances behind a load balancer, and ensure persistent volumes for registry and shared database clusters.
 
 ---
 
@@ -192,7 +218,7 @@ The CLI talks to CARS Node’s APIs. Everything you can do interactively (`cars`
 ### Release Management and Artifact Deployments
 
 - **Upload Artifacts:** Once you run `cars build`, you get a `.tgz` artifact. `cars release now` or `cars release upload-files` sends this artifact to CARS Node.
-- **Deploying to Kubernetes:** CARS Node handles the Kubernetes deployments automatically, running `helm upgrade --install` behind the scenes.
+- **Deploying to Kubernetes:** CARS Node handles the Kubernetes deployments automatically, running `helm upgrade --install` behind the scenes. In shared DB mode, backend project charts contain only app workloads, services, ingress, autoscaling, disruption budget, and app secrets; per-project PXC, HAProxy, MongoDB, arbiter, and database PVC resources are not rendered.
 
 ### Adjusting Pricing and Billing Policies
 
@@ -203,6 +229,27 @@ Set rates for CPU, memory, disk, network usage in `.env`. CARS Node reads these 
 - **Prometheus Setup:** CARS Node expects a working Prometheus endpoint.  
 - **Logs and Metrics:** You can add additional dashboards or integrate with Grafana for advanced observability.
 - **Health Endpoints:** CARS Node exposes `GET /health/live`, `GET /health/ready`, and `GET /health` for system health. Project admins can also call `POST /api/v1/project/:projectId/health` for namespace-aware checks covering app replicas, sticky routing, MySQL, MongoDB, and backend HTTP readiness.
+
+### Shared DB Migration
+
+Use the migration CLI to inventory and collapse existing per-project database workloads into the shared clusters:
+
+```bash
+npm run migrate:shared-db -- --all --dry-run
+npm run migrate:shared-db -- --namespace cars-project-<project_uuid> --apply
+```
+
+The apply flow scales the app down, provisions the target MySQL and MongoDB users/databases, runs dump/restore jobs, patches the project DB secret, restores the app deployment, labels old DB resources with `cars.bsv.io/shared-db-migrated=true`, scales old DB StatefulSets to zero, and excludes old DB resources from Velero backups. It does not delete old PVCs or DB resources. Use explicit prune only after backup, retention, and verification:
+
+```bash
+npm run migrate:shared-db -- --namespace cars-project-<project_uuid> --prune
+```
+
+For CARS Node metadata, migrate `cars_db` into shared MySQL before restarting CARS Node with the shared `MYSQL_DATABASE_URL`:
+
+```bash
+npm run migrate:shared-db -- --cars-metadata --source-url "$MYSQL_DATABASE_URL" --target-url "mysql://cars_user:<password>@shared-mysql-haproxy.cars-operator-system.svc.cluster.local:3306/cars_db" --apply
+```
 
 ### Automation and CI/CD Integration
 

@@ -32,6 +32,13 @@ services:
       TAAL_API_KEY_TEST: ${TAAL_API_KEY_TEST}
       CARS_NODE_SERVER_BASEURL: ${CARS_NODE_SERVER_BASEURL}
       MYSQL_DATABASE_URL: "mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE}"
+      CARS_PROJECT_DB_MODE: ${CARS_PROJECT_DB_MODE:-shared}
+      SHARED_DB_NAMESPACE: ${SHARED_DB_NAMESPACE:-cars-operator-system}
+      SHARED_MYSQL_ADMIN_URL: ${SHARED_MYSQL_ADMIN_URL:-}
+      SHARED_MYSQL_APP_HOST: ${SHARED_MYSQL_APP_HOST:-shared-mysql-haproxy.cars-operator-system.svc.cluster.local}
+      SHARED_MONGO_ADMIN_URL: ${SHARED_MONGO_ADMIN_URL:-}
+      SHARED_MONGO_APP_HOSTS: ${SHARED_MONGO_APP_HOSTS:-shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017}
+      SHARED_MONGO_REPLICA_SET: ${SHARED_MONGO_REPLICA_SET:-rs0}
       LOG_LEVEL: "info"
       K3S_TOKEN: ${K3S_TOKEN}
       KUBECONFIG: ${KUBECONFIG_FILE_PATH}

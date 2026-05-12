@@ -9,6 +9,7 @@ import { sendAdminNotificationEmail, sendWelcomeEmail, sendDomainChangeEmail } f
 import { enableIngress } from '../utils/ingress';
 import axios from 'axios';
 import { collectProjectHealth } from '../health';
+import { getProjectDbMode, getSharedDbConfig } from '../shared-db';
 
 const router = Router();
 
@@ -718,6 +719,22 @@ router.post('/:projectId/logs/resource/:resource', requireRegisteredUser, requir
     const sanitizedTail = sanitizeTailValue(tail);
 
     try {
+        if ((resource === 'mysql' || resource === 'mongo') && getProjectDbMode() === 'shared') {
+            const sharedDbConfig = getSharedDbConfig();
+            return res.json({
+                resource,
+                logs: '',
+                message: `${resource} logs are operator-managed because this CARS node uses shared project databases.`,
+                metadata: {
+                    mode: 'shared',
+                    operatorNamespace: sharedDbConfig.namespace,
+                    since,
+                    tail: sanitizedTail,
+                    level
+                }
+            });
+        }
+
         const namespace = `cars-project-${project.project_uuid}`;
         const podsOutput = execSync(`kubectl get pods -n ${namespace} -o json`);
         const pods = JSON.parse(podsOutput.toString());

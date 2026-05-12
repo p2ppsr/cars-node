@@ -10,7 +10,7 @@ We will:
    
 2. **Set Up System Dependencies**:
    - Install Nginx and Certbot for HTTPS termination.
-   - Install MySQL and create a database and user for the CARS Node.
+   - Install MySQL or use the shared operator MySQL cluster for the CARS Node metadata database.
    - Install Docker and Docker Compose.
    - Run the CARS Node setup script and configure environment variables.
 
@@ -245,6 +245,12 @@ When prompted, provide the necessary details. Important environment values:
 - `MYSQL_USER=cars_user`
 - `MYSQL_PASSWORD=cars_pass` (generate one)
 - `MYSQL_ROOT_PASSWORD=rootpw` (generate one)
+- `MYSQL_DATABASE_URL=mysql://cars_user:<password>@shared-mysql-haproxy.cars-operator-system.svc.cluster.local:3306/cars_db` for shared production installs. The Docker Compose demo still points this at the local `mysql` service.
+- `CARS_PROJECT_DB_MODE=shared` for new deployments.
+- `SHARED_MYSQL_ADMIN_URL=mysql://root:<password>@shared-mysql-haproxy.cars-operator-system.svc.cluster.local:3306/mysql`
+- `SHARED_MYSQL_APP_HOST=shared-mysql-haproxy.cars-operator-system.svc.cluster.local`
+- `SHARED_MONGO_ADMIN_URL=mongodb://root:<password>@shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017/admin?replicaSet=rs0&authSource=admin`
+- `SHARED_MONGO_APP_HOSTS=shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017`
 - `MAINNET_PRIVATE_KEY` and `TESTNET_PRIVATE_KEY`: You’ll need to provide 64-char hex keys. Generate securely or use existing keys. Fund with at least 250,000 satoshis. [Use KeyFunder](https://keyfunder.babbage.systems). If testnet key funding isn't working (for now), just ignore and move on.
 - `TAAL_API_KEY_MAIN` and `TAAL_API_KEY_TEST`: Obtain from TAAL (explained in next step).
 - `K3S_TOKEN=cars-token` (generate a random token)
@@ -256,6 +262,37 @@ When prompted, provide the necessary details. Important environment values:
 - `SENDGRID_API_KEY` (obtain from SendGrid)
 - `SYSTEM_FROM_EMAIL=your@verified-domain.com` (use your SendGrid-verified email)
 - `CERT_ISSUANCE_EMAIL=your@verified-domain.com` (use the email you used with `certbot` earlier, or another one where you have already agreed to the LetsEncrypt terms)
+
+### Shared Database Install
+
+The intended path for new production deployments is shared DB mode. Before deploying backend projects, install the shared operator databases:
+
+```bash
+kubectl apply -f k8s/shared-databases.yaml
+```
+
+Replace the `CHANGE_ME` values in the manifest first. It creates `shared-mysql` in `cars-operator-system` as a 3-pod Percona XtraDB Cluster with 2 HAProxy pods and 100Gi Longhorn volumes, plus `shared-mongo` as 2 data members and 1 arbiter with 100Gi Longhorn volumes for the data members.
+
+In shared mode, each project gets its own MySQL database, MongoDB database, and DB user/password, but no namespace-local PXC, HAProxy, MongoDB, arbiter, or DB PVCs. Set `CARS_PROJECT_DB_MODE=legacy-per-project` only if you need the older per-project database workload behavior.
+
+Existing projects can be inventoried and migrated procedurally:
+
+```bash
+npm run migrate:shared-db -- --all --dry-run
+npm run migrate:shared-db -- --namespace cars-project-<project_uuid> --apply
+```
+
+The first apply labels and scales down old DB resources but does not delete them. Prune later, after backup and retention checks:
+
+```bash
+npm run migrate:shared-db -- --namespace cars-project-<project_uuid> --prune
+```
+
+Move the CARS metadata database before changing `MYSQL_DATABASE_URL`:
+
+```bash
+npm run migrate:shared-db -- --cars-metadata --source-url "$MYSQL_DATABASE_URL" --target-url "mysql://cars_user:<password>@shared-mysql-haproxy.cars-operator-system.svc.cluster.local:3306/cars_db" --apply
+```
 
 ### Obtain TAAL API Keys
 
@@ -412,7 +449,7 @@ If SSL certificates for projects are required, CARS Node will annotate ingresses
 
 - **Pricing:** Edit environment variables in `.env` for CPU, MEM, DISK, NET rates and `docker compose up -d`.
 - **Prometheus/Grafana:** You can integrate external Prometheus/Grafana to monitor resource usage and get deeper insights. Your Prometheus endpoint is publicly available at `https://prometheus.projects.example.com`. Strongly consider setting up authentication.
-- **Scaling Up:** For more load, increase VPS size or run MySQL and registry externally. Point `KUBECONFIG_FILE_PATH` to a remote Kubernetes cluster. Modify Helm charts for replication and horizontal pod autoscalers.
+- **Scaling Up:** For more load, use the shared Percona PXC and MongoDB clusters for project data, keep `cars_db` on shared MySQL, run the registry externally if needed, and point `KUBECONFIG_FILE_PATH` to a remote Kubernetes cluster.
 
 ---
 
@@ -431,7 +468,7 @@ Monitor logs and ensure everything restarts cleanly.
 
 You’ve now deployed CARS Node in a small-scale environment with:
 - A VPS running Nginx as a reverse proxy with TLS via Let’s Encrypt.
-- Local MySQL database.
+- Local MySQL database for the Docker Compose demo, or `cars_db` on shared MySQL for production.
 - K3s-based Kubernetes cluster inside Docker for your projects.
 - Docker Compose orchestrating all services.
 - Domain and DNS properly configured.

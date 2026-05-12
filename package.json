@@ -4,6 +4,7 @@
     "main": "dist/src/server.js",
     "files": [
         "dist",
+        "k8s",
         "README.md",
         "GETTING_STARTED.md",
         "LICENSE.txt"
@@ -11,6 +12,7 @@
     "scripts": {
         "build": "tsc -p tsconfig.json",
         "test": "npm run build",
+        "migrate:shared-db": "tsx src/tools/migrate-shared-db.ts",
         "start:dev": "tsx watch src/server.ts",
         "start:prod": "node dist/src/server.js",
         "setup": "node dist/setup.js",
@@ -35,6 +37,7 @@
         "fs-extra": "^11.2.0",
         "inquirer": "^12.2.0",
         "knex": "^3.1.0",
+        "mongodb": "^6.12.0",
         "mysql2": "^3.11.5",
         "pino": "^9.5.0",
         "pino-pretty": "^13.0.0"

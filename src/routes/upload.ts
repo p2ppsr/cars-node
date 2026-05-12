@@ -16,8 +16,19 @@ import {
 } from '../utils';
 import { findBalanceForKey, fundKey } from '../utils/wallet';
 import { sendDeploymentFailureEmail } from '../utils/email';
+import {
+  ProjectDbCredentials,
+  buildProjectDbCredentials,
+  ensureSharedProjectDatabases,
+  getProjectDbMode,
+  readProjectDbSecret,
+} from '../shared-db';
 
 const projectsDomain: string = process.env.PROJECT_DEPLOYMENT_DNS_NAME!;
+
+function yamlString(value: string) {
+  return JSON.stringify(value);
+}
 
 export default async (req: Request, res: Response) => {
   const { db, mainnetWallet: wallet, testnetWallet }: { db: Knex, mainnetWallet: WalletInterface, testnetWallet: WalletInterface } = req as any;
@@ -303,9 +314,20 @@ description: A chart to deploy a CARS project
 `
     );
 
-    // We'll create MySQL/Mongo if backendEnabled is true
-    const useMySQL = backendEnabled;
-    const useMongo = backendEnabled;
+    const namespace = `cars-project-${project.project_uuid}`;
+    const helmReleaseName = `cars-project-${project.project_uuid.substr(0, 24)}`;
+    const projectDbMode = getProjectDbMode();
+    const useMySQL = backendEnabled && projectDbMode === 'legacy-per-project';
+    const useMongo = backendEnabled && projectDbMode === 'legacy-per-project';
+    let sharedDbCredentials: ProjectDbCredentials | undefined;
+
+    if (backendEnabled && projectDbMode === 'shared') {
+      const existingSecret = readProjectDbSecret(namespace, `${helmReleaseName}-db-connection`);
+      sharedDbCredentials = buildProjectDbCredentials(project.project_uuid, existingSecret);
+      await ensureSharedProjectDatabases(sharedDbCredentials);
+      await logStep(`Shared database credentials provisioned for ${project.project_uuid}`);
+    }
+
     const ingressHost = `${project.project_uuid}.${projectsDomain}`;
 
     // Values for the chart
@@ -318,14 +340,16 @@ description: A chart to deploy a CARS project
       ingressCustomBackend: project.backend_custom_domain,
       useMySQL,
       useMongo,
+      projectDbMode,
       appReplicas: 2,
       appMinReplicas: 2,
       appMaxReplicas: 10,
       computeNodes: ['server2', 'server3'],
       storageWitnessNode: 'box',
-      mysqlServiceName: 'mysql-ha',
+      mysqlServiceName: sharedDbCredentials?.mysqlWaitHost || 'mysql-ha',
       mongoReplicaSetName: 'rs0',
       mongoServiceName: 'mongo-rs',
+      mongoWaitHost: sharedDbCredentials?.mongoWaitHost || `mongo-rs-0.mongo-rs.${namespace}.svc.cluster.local`,
       storageClass: 'longhorn-replicated',
       storage: {
         mysqlSize: '20Gi',
@@ -348,12 +372,29 @@ description: A chart to deploy a CARS project
 
     fs.writeFileSync(
       path.join(helmDir, 'templates', 'db-secrets.yaml'),
-      `apiVersion: v1
+      backendEnabled && projectDbMode === 'shared' && sharedDbCredentials
+        ? `{{- if .Values.backendImage }}
+apiVersion: v1
 kind: Secret
 metadata:
   name: {{ include "cars-project.fullname" . }}-db-connection
   labels:
     app: {{ include "cars-project.fullname" . }}
+    cars.bsv.io/db-mode: shared
+type: Opaque
+stringData:
+  KNEX_URL: ${yamlString(sharedDbCredentials.knexUrl)}
+  MONGO_URL: ${yamlString(sharedDbCredentials.mongoUrl)}
+{{- end }}
+`
+        : `{{- if .Values.backendImage }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "cars-project.fullname" . }}-db-connection
+  labels:
+    app: {{ include "cars-project.fullname" . }}
+    cars.bsv.io/db-mode: legacy-per-project
 type: Opaque
 stringData:
   KNEX_URL: "mysql://projectUser:projectPass@{{ .Values.mysqlServiceName }}:3306/projectdb"
@@ -371,6 +412,7 @@ stringData:
   MONGO_ROOT_USERNAME: "root"
   MONGO_ROOT_PASSWORD: "rootpassword"
   MONGO_RS_KEY: "${projectServerPrivateKey}${projectServerPrivateKey}${projectServerPrivateKey}"
+{{- end }}
 `
     );
 
@@ -443,7 +485,7 @@ spec:
           - /bin/sh
           - -ec
           - |
-            until nc -z mongo-rs-0.{{ .Values.mongoServiceName }}.{{ .Release.Namespace }}.svc.cluster.local 27017; do
+            until nc -z {{ .Values.mongoWaitHost }} 27017; do
               sleep 5
             done
       {{- end }}
@@ -479,7 +521,7 @@ spec:
               name: {{ include "cars-project.fullname" . }}-db-connection
               key: MONGO_URL
         - name: MONGO_WAIT_HOST
-          value: "mongo-rs-0.{{ .Values.mongoServiceName }}.{{ .Release.Namespace }}.svc.cluster.local"
+          value: "{{ .Values.mongoWaitHost }}"
         - name: MONGO_WAIT_PORT
           value: "27017"
         - name: WEB_UI_CONFIG
@@ -1253,9 +1295,6 @@ spec:
     await logStep(`Helm chart generated at ${helmDir}`);
 
     // 15) Deploy with Helm
-    const namespace = `cars-project-${project.project_uuid}`;
-    const helmReleaseName = `cars-project-${project.project_uuid.substr(0, 24)}`;
-
     const helmTimeout = process.env.CARS_HELM_TIMEOUT || '20m';
     runCmd(
       `helm upgrade --install ${helmReleaseName} ${helmDir} --namespace ${namespace} --atomic --create-namespace --timeout ${helmTimeout}`

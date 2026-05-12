@@ -1,0 +1,326 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cars-operator-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shared-mysql-secrets
+  namespace: cars-operator-system
+type: Opaque
+stringData:
+  root: "CHANGE_ME_SHARED_MYSQL_ROOT"
+  xtrabackup: "CHANGE_ME_SHARED_MYSQL_XTRABACKUP"
+  monitor: "CHANGE_ME_SHARED_MYSQL_MONITOR"
+  proxyadmin: "CHANGE_ME_SHARED_MYSQL_PROXYADMIN"
+  clustercheck: "CHANGE_ME_SHARED_MYSQL_CLUSTERCHECK"
+  operator: "CHANGE_ME_SHARED_MYSQL_OPERATOR"
+  replication: "CHANGE_ME_SHARED_MYSQL_REPLICATION"
+---
+apiVersion: pxc.percona.com/v1
+kind: PerconaXtraDBCluster
+metadata:
+  name: shared-mysql
+  namespace: cars-operator-system
+spec:
+  crVersion: 1.18.0
+  secretsName: shared-mysql-secrets
+  updateStrategy: SmartUpdate
+  allowUnsafeConfigurations: false
+  unsafeFlags:
+    tls: true
+  pxc:
+    size: 3
+    image: percona/percona-xtradb-cluster:8.0.42-33.1
+    autoRecovery: true
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+    tolerations:
+      - key: "storage.longhorn.io/node"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+    podDisruptionBudget:
+      maxUnavailable: 1
+    affinity:
+      advanced:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - "server2"
+                      - "server3"
+                      - "box"
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/component: pxc
+                  app.kubernetes.io/instance: shared-mysql
+    volumeSpec:
+      persistentVolumeClaim:
+        storageClassName: longhorn-replicated
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 100Gi
+  haproxy:
+    enabled: true
+    image: percona/haproxy:2.8.15
+    size: 2
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        cpu: "1"
+        memory: "1Gi"
+    podDisruptionBudget:
+      minAvailable: 1
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shared-mongo-credentials
+  namespace: cars-operator-system
+type: Opaque
+stringData:
+  MONGO_ROOT_USERNAME: "root"
+  MONGO_ROOT_PASSWORD: "CHANGE_ME_SHARED_MONGO_ROOT"
+  MONGO_RS_KEY: "CHANGE_ME_SHARED_MONGO_KEY_AT_LEAST_6_CHARS"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shared-mongo
+  namespace: cars-operator-system
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: shared-mongo
+  ports:
+    - name: mongo
+      port: 27017
+      targetPort: 27017
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: shared-mongo
+  namespace: cars-operator-system
+spec:
+  serviceName: shared-mongo
+  replicas: 2
+  selector:
+    matchLabels:
+      app: shared-mongo
+  template:
+    metadata:
+      labels:
+        app: shared-mongo
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - "server2"
+                      - "server3"
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: shared-mongo
+      initContainers:
+        - name: prepare-keyfile
+          image: busybox:1.36
+          command: ["/bin/sh", "-ec", "cp /secret/keyfile /workdir/keyfile && chmod 600 /workdir/keyfile && chown 999:999 /workdir/keyfile"]
+          volumeMounts:
+            - name: mongo-keyfile-secret
+              mountPath: /secret
+              readOnly: true
+            - name: mongo-keyfile
+              mountPath: /workdir
+      containers:
+        - name: mongo
+          image: mongo:6.0
+          args: ["--bind_ip_all", "--replSet", "rs0", "--auth", "--keyFile=/etc/mongo-keyfile/keyfile"]
+          ports:
+            - containerPort: 27017
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: shared-mongo-credentials
+                  key: MONGO_ROOT_USERNAME
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: shared-mongo-credentials
+                  key: MONGO_ROOT_PASSWORD
+          volumeMounts:
+            - name: mongo-data
+              mountPath: /data/db
+            - name: mongo-keyfile
+              mountPath: /etc/mongo-keyfile
+              readOnly: true
+      volumes:
+        - name: mongo-keyfile
+          emptyDir: {}
+        - name: mongo-keyfile-secret
+          secret:
+            secretName: shared-mongo-credentials
+            items:
+              - key: MONGO_RS_KEY
+                path: keyfile
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: "OnRootMismatch"
+  volumeClaimTemplates:
+    - metadata:
+        name: mongo-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: longhorn-replicated
+        resources:
+          requests:
+            storage: 100Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shared-mongo-arbiter
+  namespace: cars-operator-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shared-mongo-arbiter
+  template:
+    metadata:
+      labels:
+        app: shared-mongo-arbiter
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: "box"
+      tolerations:
+        - key: "storage.longhorn.io/node"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      initContainers:
+        - name: prepare-keyfile
+          image: busybox:1.36
+          command: ["/bin/sh", "-ec", "cp /secret/keyfile /workdir/keyfile && chmod 600 /workdir/keyfile && chown 999:999 /workdir/keyfile"]
+          volumeMounts:
+            - name: mongo-keyfile-secret
+              mountPath: /secret
+              readOnly: true
+            - name: mongo-keyfile
+              mountPath: /workdir
+      containers:
+        - name: mongo
+          image: mongo:6.0
+          args: ["--bind_ip_all", "--replSet", "rs0", "--auth", "--keyFile=/etc/mongo-keyfile/keyfile"]
+          ports:
+            - containerPort: 27017
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: shared-mongo-credentials
+                  key: MONGO_ROOT_USERNAME
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: shared-mongo-credentials
+                  key: MONGO_ROOT_PASSWORD
+          volumeMounts:
+            - name: mongo-keyfile
+              mountPath: /etc/mongo-keyfile
+              readOnly: true
+      volumes:
+        - name: mongo-keyfile
+          emptyDir: {}
+        - name: mongo-keyfile-secret
+          secret:
+            secretName: shared-mongo-credentials
+            items:
+              - key: MONGO_RS_KEY
+                path: keyfile
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shared-mongo-arbiter
+  namespace: cars-operator-system
+spec:
+  selector:
+    app: shared-mongo-arbiter
+  ports:
+    - name: mongo
+      port: 27017
+      targetPort: 27017
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shared-mongo-init
+  namespace: cars-operator-system
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mongo-rs-init
+          image: mongo:6.0
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              until mongosh --host shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local -u "$MONGO_ROOT_USERNAME" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 })'; do
+                sleep 10
+              done
+              mongosh --host shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local -u "$MONGO_ROOT_USERNAME" -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin <<'JS'
+              const desiredConfig = {
+                _id: "rs0",
+                members: [
+                  { _id: 0, host: "shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017", priority: 2 },
+                  { _id: 1, host: "shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017", priority: 1 },
+                  { _id: 2, host: "shared-mongo-arbiter.cars-operator-system.svc.cluster.local:27017", arbiterOnly: true }
+                ]
+              };
+              try {
+                rs.status();
+              } catch (error) {
+                rs.initiate(desiredConfig);
+              }
+              JS
+          env:
+            - name: MONGO_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: shared-mongo-credentials
+                  key: MONGO_ROOT_USERNAME
+            - name: MONGO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: shared-mongo-credentials
+                  key: MONGO_ROOT_PASSWORD

@@ -1,6 +1,7 @@
 import { execSync } from 'child_process';
 import axios from 'axios';
 import type { Knex } from 'knex';
+import { getProjectDbMode, getSharedDbConfig } from './shared-db';
 
 type HealthStatus = 'ok' | 'degraded' | 'error';
 
@@ -167,13 +168,37 @@ export async function collectProjectHealth(projectId: string, options: {
 } = {}) {
     const namespace = namespaceForProject(projectId);
     const releaseName = releaseNameForProject(projectId);
+    const projectDbMode = getProjectDbMode();
+    const sharedDbConfig = getSharedDbConfig();
     const resources = parseJsonCommand(`kubectl get deploy,sts,svc,pdb,hpa,ingress -n ${namespace} -o json`);
     const pods = parseJsonCommand(`kubectl get pods -n ${namespace} -o json`);
     let pxcResources: any[] = [];
-    try {
-        pxcResources = parseJsonCommand(`kubectl get pxc -n ${namespace} -o json`).items || [];
-    } catch {
-        pxcResources = [];
+    if (projectDbMode === 'legacy-per-project') {
+        try {
+            pxcResources = parseJsonCommand(`kubectl get pxc -n ${namespace} -o json`).items || [];
+        } catch {
+            pxcResources = [];
+        }
+    }
+    let sharedPxc: any | undefined;
+    let sharedMongoStatefulSet: any | undefined;
+    let sharedMongoArbiter: any | undefined;
+    if (projectDbMode === 'shared') {
+        try {
+            sharedPxc = parseJsonCommand(`kubectl get pxc shared-mysql -n ${sharedDbConfig.namespace} -o json`);
+        } catch {
+            sharedPxc = undefined;
+        }
+        try {
+            sharedMongoStatefulSet = parseJsonCommand(`kubectl get sts shared-mongo -n ${sharedDbConfig.namespace} -o json`);
+        } catch {
+            sharedMongoStatefulSet = undefined;
+        }
+        try {
+            sharedMongoArbiter = parseJsonCommand(`kubectl get deploy shared-mongo-arbiter -n ${sharedDbConfig.namespace} -o json`);
+        } catch {
+            sharedMongoArbiter = undefined;
+        }
     }
 
     const items = resources.items || [];
@@ -185,6 +210,14 @@ export async function collectProjectHealth(projectId: string, options: {
     const mongoStatefulSet = items.find((item: any) => item.kind === 'StatefulSet' && item.metadata?.name === 'mongo-rs');
     const mongoArbiter = items.find((item: any) => item.kind === 'Deployment' && item.metadata?.name === 'mongo-arbiter');
     const pxc = pxcResources[0];
+    let dbSecret: any | undefined;
+    if (projectDbMode === 'shared') {
+        try {
+            dbSecret = parseJsonCommand(`kubectl get secret ${releaseName}-db-connection -n ${namespace} -o json`);
+        } catch {
+            dbSecret = undefined;
+        }
+    }
 
     const appPods = (pods.items || []).filter((pod: any) => pod.metadata?.labels?.app === releaseName);
     const readyAppPods = appPods.filter((pod: any) => podReady(pod));
@@ -285,6 +318,35 @@ export async function collectProjectHealth(projectId: string, options: {
         runHealthCheck({
             name: 'mysql',
             handler: async () => {
+                if (projectDbMode === 'shared') {
+                    if (!dbSecret?.data?.KNEX_URL) {
+                        return {
+                            status: 'error',
+                            message: 'Project DB secret is missing KNEX_URL',
+                            details: { secret: `${releaseName}-db-connection` }
+                        };
+                    }
+                    if (!sharedPxc) {
+                        return {
+                            status: 'error',
+                            message: 'Shared MySQL cluster shared-mysql is missing',
+                            details: { namespace: sharedDbConfig.namespace }
+                        };
+                    }
+                    const ready = sharedPxc.status?.ready || 0;
+                    const size = sharedPxc.spec?.pxc?.size || 0;
+                    return {
+                        status: ready >= size && size > 0 ? 'ok' : 'error',
+                        details: {
+                            mode: projectDbMode,
+                            namespace: sharedDbConfig.namespace,
+                            name: sharedPxc.metadata?.name,
+                            ready,
+                            size,
+                            state: sharedPxc.status?.state
+                        }
+                    };
+                }
                 if (!pxc) {
                     return {
                         status: 'degraded',
@@ -308,6 +370,35 @@ export async function collectProjectHealth(projectId: string, options: {
         runHealthCheck({
             name: 'mongo',
             handler: async () => {
+                if (projectDbMode === 'shared') {
+                    if (!dbSecret?.data?.MONGO_URL) {
+                        return {
+                            status: 'error',
+                            message: 'Project DB secret is missing MONGO_URL',
+                            details: { secret: `${releaseName}-db-connection` }
+                        };
+                    }
+                    if (!sharedMongoStatefulSet) {
+                        return {
+                            status: 'error',
+                            message: 'Shared Mongo StatefulSet shared-mongo is missing',
+                            details: { namespace: sharedDbConfig.namespace }
+                        };
+                    }
+                    const desiredMembers = sharedMongoStatefulSet.spec?.replicas || 0;
+                    const readyMembers = sharedMongoStatefulSet.status?.readyReplicas || 0;
+                    const arbiterReady = (sharedMongoArbiter?.status?.readyReplicas || 0) >= 1;
+                    return {
+                        status: desiredMembers > 0 && readyMembers >= desiredMembers && arbiterReady ? 'ok' : 'error',
+                        details: {
+                            mode: projectDbMode,
+                            namespace: sharedDbConfig.namespace,
+                            desiredMembers,
+                            readyMembers,
+                            arbiterReady
+                        }
+                    };
+                }
                 if (!mongoStatefulSet) {
                     return {
                         status: 'degraded',
