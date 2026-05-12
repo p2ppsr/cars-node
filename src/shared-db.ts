@@ -138,7 +138,8 @@ async function ensureSharedMongoDatabase(adminUrl: string, credentials: ProjectD
         roles: [role],
       });
     } catch (error: any) {
-      if (!String(error?.codeName || error?.message || '').includes('Duplicate')) {
+      const message = String(error?.codeName || error?.message || '');
+      if (!message.includes('Duplicate') && !message.includes('already exists')) {
         throw error;
       }
       await db.command({
