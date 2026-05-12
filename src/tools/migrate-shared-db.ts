@@ -416,9 +416,17 @@ function parseMysqlUrl(rawUrl: string) {
 }
 
 function parseMongoDbName(rawUrl: string): string {
-  const parsed = new URL(rawUrl);
-  const database = parsed.pathname.replace(/^\//, '') || 'admin';
-  return database;
+  const schemeEnd = rawUrl.indexOf('://');
+  if (schemeEnd === -1 || !rawUrl.substring(0, schemeEnd).startsWith('mongodb')) {
+    throw new Error(`MongoDB URL has an unsupported scheme: ${redactUrl(rawUrl)}`);
+  }
+  const authorityAndPath = rawUrl.substring(schemeEnd + 3);
+  const pathStart = authorityAndPath.indexOf('/');
+  if (pathStart === -1) {
+    return 'admin';
+  }
+  const path = authorityAndPath.substring(pathStart + 1).split(/[?#]/, 1)[0];
+  return path ? decodeURIComponent(path) : 'admin';
 }
 
 function kubectlJson(args: string[], optional = false): any {
