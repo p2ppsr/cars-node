@@ -112,12 +112,14 @@ export default async (req: Request, res: Response) => {
       return res.status(401).json({ error: `Project balance must be at least 1 satoshi to upload a deployment. Current balance: ${project.balance}` });
     }
 
-    // 4) Start draining the upload immediately. Signature verification can be
-    // slow enough to stall large request bodies on some LAN paths, so run it in
-    // parallel while nginx and Express continue reading the stream.
+    // 4) Drain the upload before signature verification. Some wallet verification
+    // paths can block the Node event loop long enough to stall large request
+    // bodies on asymmetric LAN paths, so do not verify until the body is safely
+    // on disk.
     const filePath = path.join('/tmp', `artifact_${deploymentId}.tgz`);
-    const uploadPromise = writeUploadToFile(req, filePath);
-    const signaturePromise = wallet.verifySignature({
+    const bytesWritten = await writeUploadToFile(req, filePath);
+
+    const { valid } = await wallet.verifySignature({
       data: Utils.toArray(deploymentId, 'hex'),
       signature: Utils.toArray(signature, 'hex'),
       protocolID: [2, 'url signing'],
@@ -125,16 +127,12 @@ export default async (req: Request, res: Response) => {
       counterparty: 'self'
     });
 
-    const { valid } = await signaturePromise;
     if (!valid) {
-      req.destroy(new Error('Invalid signature'));
-      await uploadPromise.catch(() => undefined);
       await fs.remove(filePath).catch(() => undefined);
       return res.status(401).json({ error: 'Invalid signature' });
     }
 
     // 5) Store file locally
-    const bytesWritten = await uploadPromise;
     await db('deploys').where({ id: deploy.id }).update({ file_path: filePath });
     await logStep(`File uploaded successfully, saved to ${filePath} (${bytesWritten} bytes)`);
 
@@ -747,7 +745,7 @@ spec:
       - www.{{ .Values.ingressCustomFrontend }}
       secretName: project-${project.project_uuid}-www-tls
   rules:
-  - host: www.{{ .Values.ingressHostFrontend }}
+  - host: www.{{ .Values.ingressCustomFrontend }}
     http:
       paths:
       - path: /
@@ -798,16 +796,6 @@ ${tlsHosts}      secretName: project-${project.project_uuid}-tls
       if (project.frontend_custom_domain) {
         ingressYaml += `
   - host: {{ .Values.ingressCustomFrontend }}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: {{ include "cars-project.fullname" . }}-service
-            port:
-              number: 80
-  - host: www.{{ .Values.ingressCustomFrontend }}
     http:
       paths:
       - path: /
