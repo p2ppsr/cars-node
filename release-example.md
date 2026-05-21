@@ -41,6 +41,18 @@ k -n "$NS" get endpoints registry -o wide
 k -n "$NS" get deploy "$DEPLOY" -o yaml > "${DEPLOY}.backup.$(date +%F-%H%M%S).yaml"
 ```
 
+## Apply baseline deployment health probes
+
+The CARS operator service may use client IP session affinity so authenticated client flows stay on the same Express server. Keep HTTP startup, readiness, and liveness probes on the operator deployment so Kubernetes removes an unresponsive replica from service endpoints instead of pinning clients to a hung pod.
+
+```
+k -n "$NS" patch deploy/"$DEPLOY" \
+  --type=strategic \
+  --patch-file k8s/cars-node-probes-patch.yaml
+
+k -n "$NS" rollout status deploy/"$DEPLOY" --timeout=180s
+k -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.spec.template.spec.containers[0].readinessProbe}{"\n"}'
+```
 
 ## Start port-forward to registry
 
