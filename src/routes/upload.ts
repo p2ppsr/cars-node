@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import fs from 'fs-extra';
 import path from 'path';
+import { Transform } from 'stream';
+import { pipeline } from 'stream/promises';
 import { Utils, type WalletInterface } from '@bsv/sdk';
 import type { Knex } from 'knex';
 import { execSync } from 'child_process';
@@ -28,6 +30,36 @@ const projectsDomain: string = process.env.PROJECT_DEPLOYMENT_DNS_NAME!;
 
 function yamlString(value: string) {
   return JSON.stringify(value);
+}
+
+async function writeUploadToFile(req: Request, filePath: string) {
+  await fs.ensureDir(path.dirname(filePath));
+  const partialPath = `${filePath}.part`;
+  await fs.remove(partialPath);
+
+  let bytesWritten = 0;
+  const body = (req as any).body;
+
+  try {
+    if (Buffer.isBuffer(body)) {
+      bytesWritten = body.length;
+      await fs.writeFile(partialPath, body);
+    } else {
+      const counter = new Transform({
+        transform(chunk, _encoding, callback) {
+          bytesWritten += chunk.length;
+          callback(null, chunk);
+        }
+      });
+      await pipeline(req, counter, fs.createWriteStream(partialPath, { flags: 'wx' }));
+    }
+
+    await fs.move(partialPath, filePath, { overwrite: true });
+    return bytesWritten;
+  } catch (error) {
+    await fs.remove(partialPath).catch(() => undefined);
+    throw error;
+  }
 }
 
 export default async (req: Request, res: Response) => {
@@ -75,8 +107,17 @@ export default async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Project not found' });
     }
 
-    // 3) Verify signature
-    const { valid } = await wallet.verifySignature({
+    // 3) Check project balance before accepting the upload body.
+    if (project.balance < 1) {
+      return res.status(401).json({ error: `Project balance must be at least 1 satoshi to upload a deployment. Current balance: ${project.balance}` });
+    }
+
+    // 4) Start draining the upload immediately. Signature verification can be
+    // slow enough to stall large request bodies on some LAN paths, so run it in
+    // parallel while nginx and Express continue reading the stream.
+    const filePath = path.join('/tmp', `artifact_${deploymentId}.tgz`);
+    const uploadPromise = writeUploadToFile(req, filePath);
+    const signaturePromise = wallet.verifySignature({
       data: Utils.toArray(deploymentId, 'hex'),
       signature: Utils.toArray(signature, 'hex'),
       protocolID: [2, 'url signing'],
@@ -84,20 +125,18 @@ export default async (req: Request, res: Response) => {
       counterparty: 'self'
     });
 
+    const { valid } = await signaturePromise;
     if (!valid) {
+      req.destroy(new Error('Invalid signature'));
+      await uploadPromise.catch(() => undefined);
+      await fs.remove(filePath).catch(() => undefined);
       return res.status(401).json({ error: 'Invalid signature' });
     }
 
-    // 4) Check project balance
-    if (project.balance < 1) {
-      return res.status(401).json({ error: `Project balance must be at least 1 satoshi to upload a deployment. Current balance: ${project.balance}` });
-    }
-
     // 5) Store file locally
-    const filePath = path.join('/tmp', `artifact_${deploymentId}.tgz`);
-    fs.writeFileSync(filePath, req.body); // raw data from request
+    const bytesWritten = await uploadPromise;
     await db('deploys').where({ id: deploy.id }).update({ file_path: filePath });
-    await logStep(`File uploaded successfully, saved to ${filePath}`);
+    await logStep(`File uploaded successfully, saved to ${filePath} (${bytesWritten} bytes)`);
 
     // Acknowledge the upload before the long-running build/push/helm workflow.
     // The deployment can then continue in the background without relying on a
