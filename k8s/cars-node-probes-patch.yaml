@@ -1,0 +1,27 @@
+spec:
+  template:
+    spec:
+      containers:
+        - name: cars
+          startupProbe:
+            httpGet:
+              path: /health/ready
+              port: 7777
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 36
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 7777
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 7777
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
