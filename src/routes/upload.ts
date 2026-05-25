@@ -222,7 +222,38 @@ export default async (req: Request, res: Response) => {
     listen 80;
     server_name localhost;
     root /usr/share/nginx/html;
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_comp_level 6;
+    gzip_types
+        application/javascript
+        application/json
+        application/manifest+json
+        application/rss+xml
+        image/svg+xml
+        text/css
+        text/javascript
+        text/plain
+        text/xml;
+
+    location = /index.html {
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+    }
+
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        try_files $uri =404;
+    }
+
+    location ~* \\.(?:avif|webp|jpg|jpeg|png|gif|ico|svg|woff2?)$ {
+        add_header Cache-Control "public, max-age=604800, stale-while-revalidate=86400" always;
+        try_files $uri =404;
+    }
+
     location / {
+        add_header Cache-Control "no-cache" always;
         try_files $uri /404.html /index.html;
     }
 }`
