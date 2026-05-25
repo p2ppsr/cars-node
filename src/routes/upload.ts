@@ -243,12 +243,12 @@ export default async (req: Request, res: Response) => {
     }
 
     location /assets/ {
-        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header Cache-Control "public, max-age=31536000, immutable";
         try_files $uri =404;
     }
 
     location ~* \\.(?:avif|webp|jpg|jpeg|png|gif|ico|svg|woff2?)$ {
-        add_header Cache-Control "public, max-age=604800, stale-while-revalidate=86400" always;
+        add_header Cache-Control "public, max-age=604800, stale-while-revalidate=86400";
         try_files $uri =404;
     }
 
