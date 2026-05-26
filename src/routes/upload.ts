@@ -13,6 +13,7 @@ import {
   generateDockerfile,
   generateIndexTs,
   generatePackageJson,
+  generateSafeAccessLoggerCjs,
   generateTsConfig,
   generateWaitScript,
 } from '../utils';
@@ -112,12 +113,14 @@ export default async (req: Request, res: Response) => {
       return res.status(401).json({ error: `Project balance must be at least 1 satoshi to upload a deployment. Current balance: ${project.balance}` });
     }
 
-    // 4) Start draining the upload immediately. Signature verification can be
-    // slow enough to stall large request bodies on some LAN paths, so run it in
-    // parallel while nginx and Express continue reading the stream.
+    // 4) Drain the upload before signature verification. Some wallet verification
+    // paths can block the Node event loop long enough to stall large request
+    // bodies on asymmetric LAN paths, so do not verify until the body is safely
+    // on disk.
     const filePath = path.join('/tmp', `artifact_${deploymentId}.tgz`);
-    const uploadPromise = writeUploadToFile(req, filePath);
-    const signaturePromise = wallet.verifySignature({
+    const bytesWritten = await writeUploadToFile(req, filePath);
+
+    const { valid } = await wallet.verifySignature({
       data: Utils.toArray(deploymentId, 'hex'),
       signature: Utils.toArray(signature, 'hex'),
       protocolID: [2, 'url signing'],
@@ -125,16 +128,12 @@ export default async (req: Request, res: Response) => {
       counterparty: 'self'
     });
 
-    const { valid } = await signaturePromise;
     if (!valid) {
-      req.destroy(new Error('Invalid signature'));
-      await uploadPromise.catch(() => undefined);
       await fs.remove(filePath).catch(() => undefined);
       return res.status(401).json({ error: 'Invalid signature' });
     }
 
     // 5) Store file locally
-    const bytesWritten = await uploadPromise;
     await db('deploys').where({ id: deploy.id }).update({ file_path: filePath });
     await logStep(`File uploaded successfully, saved to ${filePath} (${bytesWritten} bytes)`);
 
@@ -224,7 +223,38 @@ export default async (req: Request, res: Response) => {
     listen 80;
     server_name localhost;
     root /usr/share/nginx/html;
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_comp_level 6;
+    gzip_types
+        application/javascript
+        application/json
+        application/manifest+json
+        application/rss+xml
+        image/svg+xml
+        text/css
+        text/javascript
+        text/plain
+        text/xml;
+
+    location = /index.html {
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+    }
+
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
+    location ~* \\.(?:avif|webp|jpg|jpeg|png|gif|ico|svg|woff2?)$ {
+        add_header Cache-Control "public, max-age=604800, stale-while-revalidate=86400";
+        try_files $uri =404;
+    }
+
     location / {
+        add_header Cache-Control "no-cache" always;
         try_files $uri /404.html /index.html;
     }
 }`
@@ -288,6 +318,7 @@ EXPOSE 80`
         generateDockerfile(enableContracts)
       );
       fs.writeFileSync(path.join(backendDir, 'wait-for-services.sh'), generateWaitScript());
+      fs.writeFileSync(path.join(backendDir, 'safe-access-logger.cjs'), generateSafeAccessLoggerCjs());
       fs.writeFileSync(path.join(backendDir, 'tsconfig.json'), generateTsConfig());
       fs.writeFileSync(
         path.join(backendDir, 'package.json'),
@@ -320,7 +351,8 @@ EXPOSE 80`
     }
 
     const gaspSyncEnv = engineConfigObj.gaspSync === true ? 'true' : 'false';
-    const requestLoggingEnv = engineConfigObj.requestLogging === true ? 'true' : 'false';
+    const requestLoggingEnv = 'false';
+    const safeRequestLoggingEnv = 'true';
     const syncConfigJson = JSON.stringify(engineConfigObj.syncConfiguration || {});
     const logTimeEnv = engineConfigObj.logTime === true ? 'true' : 'false';
     const logPrefixEnv = typeof engineConfigObj.logPrefix === 'string' ? engineConfigObj.logPrefix : '[CARS OVERLAY ENGINE] ';
@@ -539,6 +571,8 @@ spec:
           value: "{{ .Values.ingressHostBackend }}"
         - name: REQUEST_LOGGING
           value: "${requestLoggingEnv}"
+        - name: SAFE_REQUEST_LOGGING
+          value: "${safeRequestLoggingEnv}"
         - name: GASP_SYNC
           value: "${gaspSyncEnv}"
         - name: NETWORK
@@ -747,7 +781,7 @@ spec:
       - www.{{ .Values.ingressCustomFrontend }}
       secretName: project-${project.project_uuid}-www-tls
   rules:
-  - host: www.{{ .Values.ingressHostFrontend }}
+  - host: www.{{ .Values.ingressCustomFrontend }}
     http:
       paths:
       - path: /
@@ -798,16 +832,6 @@ ${tlsHosts}      secretName: project-${project.project_uuid}-tls
       if (project.frontend_custom_domain) {
         ingressYaml += `
   - host: {{ .Values.ingressCustomFrontend }}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: {{ include "cars-project.fullname" . }}-service
-            port:
-              number: 80
-  - host: www.{{ .Values.ingressCustomFrontend }}
     http:
       paths:
       - path: /
