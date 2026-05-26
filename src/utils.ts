@@ -60,6 +60,9 @@ const main = async () => {
   if (process.env.ARC_API_KEY) {
     server.configureArcApiKey(process.env.ARC_API_KEY!);
   }
+  if (process.env.ARC_CALLBACK_TOKEN) {
+    server.configureArcCallbackToken(process.env.ARC_CALLBACK_TOKEN!);
+  }
 
   // If a WebUI config is set, parse it and configure
   if (process.env.WEB_UI_CONFIG) {
