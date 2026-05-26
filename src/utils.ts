@@ -250,8 +250,10 @@ export function generateSafeAccessLoggerCjs() {
   return `'use strict';
 
 if (process.env.SAFE_REQUEST_LOGGING === 'true') {
+  const { createRequire } = require('module');
+  const appRequire = createRequire('/app/index.ts');
   const crypto = require('crypto');
-  const express = require('express');
+  const express = appRequire('express');
 
   if (!express.application.__carsSafeAccessPatched) {
     express.application.__carsSafeAccessPatched = true;
