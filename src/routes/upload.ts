@@ -13,6 +13,7 @@ import {
   generateDockerfile,
   generateIndexTs,
   generatePackageJson,
+  generateSafeAccessLoggerCjs,
   generateTsConfig,
   generateWaitScript,
 } from '../utils';
@@ -317,6 +318,7 @@ EXPOSE 80`
         generateDockerfile(enableContracts)
       );
       fs.writeFileSync(path.join(backendDir, 'wait-for-services.sh'), generateWaitScript());
+      fs.writeFileSync(path.join(backendDir, 'safe-access-logger.cjs'), generateSafeAccessLoggerCjs());
       fs.writeFileSync(path.join(backendDir, 'tsconfig.json'), generateTsConfig());
       fs.writeFileSync(
         path.join(backendDir, 'package.json'),
@@ -350,6 +352,7 @@ EXPOSE 80`
 
     const gaspSyncEnv = engineConfigObj.gaspSync === true ? 'true' : 'false';
     const requestLoggingEnv = engineConfigObj.requestLogging === true ? 'true' : 'false';
+    const safeRequestLoggingEnv = engineConfigObj.safeRequestLogging === true ? 'true' : 'false';
     const syncConfigJson = JSON.stringify(engineConfigObj.syncConfiguration || {});
     const logTimeEnv = engineConfigObj.logTime === true ? 'true' : 'false';
     const logPrefixEnv = typeof engineConfigObj.logPrefix === 'string' ? engineConfigObj.logPrefix : '[CARS OVERLAY ENGINE] ';
@@ -568,6 +571,8 @@ spec:
           value: "{{ .Values.ingressHostBackend }}"
         - name: REQUEST_LOGGING
           value: "${requestLoggingEnv}"
+        - name: SAFE_REQUEST_LOGGING
+          value: "${safeRequestLoggingEnv}"
         - name: GASP_SYNC
           value: "${gaspSyncEnv}"
         - name: NETWORK
