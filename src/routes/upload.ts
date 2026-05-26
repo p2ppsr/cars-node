@@ -351,8 +351,8 @@ EXPOSE 80`
     }
 
     const gaspSyncEnv = engineConfigObj.gaspSync === true ? 'true' : 'false';
-    const requestLoggingEnv = engineConfigObj.requestLogging === true ? 'true' : 'false';
-    const safeRequestLoggingEnv = engineConfigObj.safeRequestLogging === true ? 'true' : 'false';
+    const requestLoggingEnv = 'false';
+    const safeRequestLoggingEnv = 'true';
     const syncConfigJson = JSON.stringify(engineConfigObj.syncConfiguration || {});
     const logTimeEnv = engineConfigObj.logTime === true ? 'true' : 'false';
     const logPrefixEnv = typeof engineConfigObj.logPrefix === 'string' ? engineConfigObj.logPrefix : '[CARS OVERLAY ENGINE] ';
