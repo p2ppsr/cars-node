@@ -414,7 +414,7 @@ description: A chart to deploy a CARS project
       projectDbMode,
       appReplicas: 2,
       appMinReplicas: 2,
-      appMaxReplicas: 10,
+      appMaxReplicas: 4,
       computeNodes: ['server2', 'server3'],
       storageWitnessNode: 'box',
       mysqlServiceName: sharedDbCredentials?.mysqlWaitHost || 'mysql-ha',
@@ -504,7 +504,7 @@ spec:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
-      maxUnavailable: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: {{ include "cars-project.fullname" . }}
@@ -616,21 +616,18 @@ spec:
         ports:
         - containerPort: 8080
         startupProbe:
-          httpGet:
-            path: /health/live
+          tcpSocket:
             port: 8080
           failureThreshold: 30
           periodSeconds: 10
         readinessProbe:
-          httpGet:
-            path: /health/ready
+          tcpSocket:
             port: 8080
           initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 5
         livenessProbe:
-          httpGet:
-            path: /health/live
+          tcpSocket:
             port: 8080
           initialDelaySeconds: 30
           periodSeconds: 20
@@ -676,6 +673,9 @@ metadata:
     app: {{ include "cars-project.fullname" . }}
 spec:
   maxReplicas: {{ .Values.appMaxReplicas }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 60
   metrics:
   - resource:
       name: cpu
@@ -757,42 +757,6 @@ spec:
         tlsHosts += `      - {{ .Values.ingressCustomBackend }}\n`;
       }
     }
-
-    // Define www ingress as separate object to ensure certs don't get clobbered
-    // If user doesn't have a custom domain this object won't get used later
-    let wwwIngressYaml = `apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: {{ include "cars-project.fullname" . }}-www
-  labels:
-    app: {{ include "cars-project.fullname" . }}
-    created-by: cars
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-production"
-    nginx.ingress.kubernetes.io/affinity: "cookie"
-    nginx.ingress.kubernetes.io/affinity-mode: "persistent"
-    nginx.ingress.kubernetes.io/session-cookie-name: "route"
-    nginx.ingress.kubernetes.io/session-cookie-max-age: "86400"
-    nginx.ingress.kubernetes.io/session-cookie-expires: "86400"
-spec:
-  ingressClassName: nginx
-  tls:
-    - hosts:
-      - www.{{ .Values.ingressCustomFrontend }}
-      secretName: project-${project.project_uuid}-www-tls
-  rules:
-  - host: www.{{ .Values.ingressCustomFrontend }}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: {{ include "cars-project.fullname" . }}-service
-            port:
-              number: 80
-`;
-
 
     let ingressYaml = `apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -877,13 +841,6 @@ ${tlsHosts}      secretName: project-${project.project_uuid}-tls
       path.join(helmDir, 'templates', 'ingress.yaml'),
       ingressYaml
     );
-
-    if (valuesObj.ingressCustomFrontend) {
-      fs.writeFileSync(
-        path.join(helmDir, 'templates', 'www-ingress.yaml'),
-        wwwIngressYaml
-      );
-    }
 
 
     //

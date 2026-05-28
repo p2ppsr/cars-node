@@ -825,10 +825,11 @@ async function handleCustomDomain(
     if (!domain || typeof domain !== 'string' || !domain.match(/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/)) {
         return res.status(400).json({ error: 'Invalid domain format. Please provide a valid domain (e.g. example.com)' });
     }
+    const normalizedDomain = domain.toLowerCase();
 
     // The expected TXT record
     const expectedRecord = `cars-project-verification=${project.project_uuid}:${domainType}`;
-    const verificationHost = `cars_project.${domain}`;
+    const verificationHost = `cars_project.${normalizedDomain}`;
 
     try {
         // Lookup TXT records
@@ -842,15 +843,26 @@ async function handleCustomDomain(
             return res.status(400).json({ error: 'DNS verification failed', instructions });
         }
 
+        const [ipv4Records, ipv6Records] = await Promise.all([
+            dns.resolve4(normalizedDomain).catch(() => []),
+            dns.resolve6(normalizedDomain).catch(() => [])
+        ]);
+        if (ipv4Records.length === 0 && ipv6Records.length === 0) {
+            return res.status(400).json({
+                error: 'Domain does not resolve',
+                instructions: `Please point ${normalizedDomain} at the CARS ingress before enabling it as a custom ${domainType} domain.`
+            });
+        }
+
         // If found, update the database
         const updateField = domainType === 'frontend' ? 'frontend_custom_domain' : 'backend_custom_domain';
         await db('projects')
             .where({ id: project.id })
-            .update({ [updateField]: domain });
+            .update({ [updateField]: normalizedDomain });
 
         await db('logs').insert({
             project_id: project.id,
-            message: `${domainType.charAt(0).toUpperCase() + domainType.slice(1)} custom domain set: ${domain}`
+            message: `${domainType.charAt(0).toUpperCase() + domainType.slice(1)} custom domain set: ${normalizedDomain}`
         });
 
         // Notify admins of domain change
@@ -863,7 +875,7 @@ async function handleCustomDomain(
         const subject = `Custom Domain Updated for Project: ${project.name}`;
         const body = `Hello,
 
-The ${domainType} custom domain for project "${project.name}" (ID: ${project.project_uuid}) has been set to: ${domain}
+The ${domainType} custom domain for project "${project.name}" (ID: ${project.project_uuid}) has been set to: ${normalizedDomain}
 
 Originated by: ${user.identity_key} (${user.email})
 
@@ -872,7 +884,7 @@ CARS System`;
 
         await sendDomainChangeEmail(emails, project, body, subject);
 
-        return res.json({ message: `${domainType.charAt(0).toUpperCase() + domainType.slice(1)} custom domain verified and set`, domain });
+        return res.json({ message: `${domainType.charAt(0).toUpperCase() + domainType.slice(1)} custom domain verified and set`, domain: normalizedDomain });
     } catch (err: any) {
         // DNS query failed or some other error
         logger.error({ err: err.message }, 'Error during DNS verification process');

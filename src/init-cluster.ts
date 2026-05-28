@@ -85,7 +85,7 @@ spec:
     solvers:
       - http01:
           ingress:
-            class: nginx
+            ingressClassName: nginx
 `;
     try {
         execSync('kubectl apply -f -', {
