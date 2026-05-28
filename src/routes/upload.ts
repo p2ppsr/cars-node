@@ -358,7 +358,7 @@ EXPOSE 80`
     const logPrefixEnv = typeof engineConfigObj.logPrefix === 'string' ? engineConfigObj.logPrefix : '[CARS OVERLAY ENGINE] ';
     const throwOnBroadcastFailEnv = engineConfigObj.throwOnBroadcastFailure === true ? 'true' : 'false';
     const adminBearerTokenEnv = project.admin_bearer_token || '';
-    const suppressDefaultSyncAdvertisements = engineConfigObj.suppressDefaultSyncAdvertisements === true ? 'true' : 'false';
+    const suppressDefaultSyncAdvertisements = engineConfigObj.suppressDefaultSyncAdvertisements === false ? 'false' : 'true';
 
     // 13) Fund project key if it’s too low
     const projectServerPrivateKey = project.private_key;
@@ -687,7 +687,7 @@ spec:
   - resource:
       name: cpu
       target:
-        averageUtilization: 50
+        averageUtilization: 200
         type: Utilization
     type: Resource
   minReplicas: {{ .Values.appMinReplicas }}
