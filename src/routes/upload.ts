@@ -674,6 +674,13 @@ metadata:
 spec:
   maxReplicas: {{ .Values.appMaxReplicas }}
   behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 120
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 120
+      selectPolicy: Min
     scaleDown:
       stabilizationWindowSeconds: 60
   metrics:
