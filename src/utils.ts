@@ -261,6 +261,19 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
   if (!express.application.__carsSafeAccessPatched) {
     express.application.__carsSafeAccessPatched = true;
     const originalUse = express.application.use;
+    const lookupCache = new Map();
+
+    const parseNonNegativeInt = (name, fallback) => {
+      const parsed = Number.parseInt(process.env[name] || '', 10);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+    };
+
+    const lookupDedupeEnabled = process.env.SAFE_LOOKUP_DEDUPE !== 'false';
+    const lookupCacheEnabled = process.env.SAFE_LOOKUP_CACHE !== 'false';
+    const lookupCacheTtlMs = parseNonNegativeInt('SAFE_LOOKUP_CACHE_TTL_MS', 5 * 60 * 1000);
+    const lookupCacheMaxEntries = parseNonNegativeInt('SAFE_LOOKUP_CACHE_MAX_ENTRIES', 256);
+    const lookupCacheMaxBodyBytes = parseNonNegativeInt('SAFE_LOOKUP_CACHE_MAX_BODY_BYTES', 8 * 1024 * 1024);
+    const lookupMutationMaxBodyBytes = parseNonNegativeInt('SAFE_LOOKUP_MUTATION_MAX_BODY_BYTES', 64 * 1024 * 1024);
 
     const byteLength = (value) => {
       if (value == null) return 0;
@@ -294,6 +307,17 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
       return json ? crypto.createHash('sha256').update(json).digest('hex') : undefined;
     };
 
+    const lookupRequestKey = (req, body) => {
+      if (!body || typeof body !== 'object') return undefined;
+      return hashValue({
+        method: req.method,
+        route: '/lookup',
+        service: body.service || body.lookupService || body.serviceName,
+        query: body.query,
+        body
+      });
+    };
+
     const firstIp = (req) => {
       const forwarded = req.headers && req.headers['x-forwarded-for'];
       if (Array.isArray(forwarded)) return String(forwarded[0]).split(',')[0].trim();
@@ -301,8 +325,74 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
       return req.ip || (req.socket && req.socket.remoteAddress);
     };
 
-    const collectResponseInfo = (bytes, chunks, truncated) => {
+    const countLookupOutputs = (parsed) => {
+      if (Array.isArray(parsed)) return parsed.length;
+      if (Array.isArray(parsed && parsed.outputs)) return parsed.outputs.length;
+      if (Array.isArray(parsed && parsed.results)) return parsed.results.length;
+      if (Array.isArray(parsed && parsed.outputList)) return parsed.outputList.length;
+      return undefined;
+    };
+
+    const dedupeArray = (items) => {
+      const seen = new Set();
+      const deduped = [];
+      for (const item of items) {
+        const key = stableJson(item);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(item);
+      }
+      return deduped;
+    };
+
+    const dedupeLookupPayload = (buffer) => {
+      if (!lookupDedupeEnabled || !buffer || buffer.length > lookupMutationMaxBodyBytes) return undefined;
+      const text = buffer.toString('utf8').trim();
+      if (!text || (text[0] !== '[' && text[0] !== '{')) return undefined;
+
+      try {
+        const parsed = JSON.parse(text);
+        const originalOutputCount = countLookupOutputs(parsed);
+        let dedupedOutputCount = originalOutputCount;
+        let changed = false;
+
+        if (Array.isArray(parsed)) {
+          const deduped = dedupeArray(parsed);
+          changed = deduped.length !== parsed.length;
+          dedupedOutputCount = deduped.length;
+          if (!changed) return undefined;
+          const body = Buffer.from(JSON.stringify(deduped));
+          return { body, originalOutputCount, dedupedOutputCount, originalBytes: buffer.length, dedupedBytes: body.length };
+        }
+
+        if (!parsed || typeof parsed !== 'object') return undefined;
+        for (const key of ['outputs', 'results', 'outputList']) {
+          if (!Array.isArray(parsed[key])) continue;
+          const originalLength = parsed[key].length;
+          const deduped = dedupeArray(parsed[key]);
+          if (deduped.length !== originalLength) {
+            parsed[key] = deduped;
+            changed = true;
+          }
+        }
+
+        if (!changed) return undefined;
+        dedupedOutputCount = countLookupOutputs(parsed);
+        const body = Buffer.from(JSON.stringify(parsed));
+        return { body, originalOutputCount, dedupedOutputCount, originalBytes: buffer.length, dedupedBytes: body.length };
+      } catch {
+        return undefined;
+      }
+    };
+
+    const collectResponseInfo = (bytes, chunks, truncated, dedupeInfo) => {
       const info = { bytes };
+      if (dedupeInfo) {
+        info.originalOutputCount = dedupeInfo.originalOutputCount;
+        info.outputCount = dedupeInfo.dedupedOutputCount;
+        info.dedupedResponseBytes = dedupeInfo.dedupedBytes;
+        info.originalResponseBytes = dedupeInfo.originalBytes;
+      }
       if (truncated) return info;
       const text = Buffer.concat(chunks.map((chunk) => (
         Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))
@@ -310,15 +400,7 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
 
       try {
         const parsed = JSON.parse(text);
-        if (Array.isArray(parsed)) {
-          info.outputCount = parsed.length;
-        } else if (Array.isArray(parsed && parsed.outputs)) {
-          info.outputCount = parsed.outputs.length;
-        } else if (Array.isArray(parsed && parsed.results)) {
-          info.outputCount = parsed.results.length;
-        } else if (Array.isArray(parsed && parsed.outputList)) {
-          info.outputCount = parsed.outputList.length;
-        }
+        info.outputCount = info.outputCount ?? countLookupOutputs(parsed);
       } catch {
         // Response bodies are intentionally not logged.
       }
@@ -330,10 +412,17 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
       if (route !== '/lookup' && route !== '/submit') return next();
 
       const started = Date.now();
-      const responseCaptureLimit = 2 * 1024 * 1024;
+      let lookupCacheHit = false;
+      const bodyAtStart = req.body && typeof req.body === 'object' ? req.body : undefined;
+      const cacheKeyAtStart = route === '/lookup' ? lookupRequestKey(req, bodyAtStart) : undefined;
+      const responseCaptureLimit = Math.max(2 * 1024 * 1024, Math.min(lookupCacheMaxBodyBytes, lookupMutationMaxBodyBytes));
       let responseBytes = 0;
       let responseCaptureBytes = 0;
       let responseTruncated = false;
+      let sawWrite = false;
+      let dedupeInfo;
+      let cacheableResponseBody;
+      let cacheableContentType;
       const responseChunks = [];
       const originalWrite = res.write;
       const originalEnd = res.end;
@@ -357,19 +446,65 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
       };
 
       res.write = function patchedWrite(chunk, encoding, callback) {
+        sawWrite = true;
         captureChunk(chunk, encoding);
         return originalWrite.call(this, chunk, encoding, callback);
       };
 
       res.end = function patchedEnd(chunk, encoding, callback) {
-        captureChunk(chunk, encoding);
-        return originalEnd.call(this, chunk, encoding, callback);
+        if (typeof chunk === 'function') {
+          callback = chunk;
+          chunk = undefined;
+          encoding = undefined;
+        } else if (typeof encoding === 'function') {
+          callback = encoding;
+          encoding = undefined;
+        }
+
+        let outgoingChunk = chunk;
+        if (route === '/lookup' && !sawWrite && chunk && res.statusCode >= 200 && res.statusCode < 300 && !res.getHeader('content-encoding')) {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), typeof encoding === 'string' ? encoding : undefined);
+          const deduped = dedupeLookupPayload(buffer);
+          if (deduped) {
+            dedupeInfo = deduped;
+            outgoingChunk = deduped.body;
+            if (res.getHeader('content-length')) res.setHeader('Content-Length', String(deduped.body.length));
+            res.setHeader('X-CARS-Lookup-Deduped', 'true');
+            if (deduped.originalOutputCount !== undefined) res.setHeader('X-CARS-Lookup-Original-Count', String(deduped.originalOutputCount));
+            if (deduped.dedupedOutputCount !== undefined) res.setHeader('X-CARS-Lookup-Output-Count', String(deduped.dedupedOutputCount));
+          }
+
+          const outgoingBuffer = Buffer.isBuffer(outgoingChunk) ? outgoingChunk : Buffer.from(String(outgoingChunk), typeof encoding === 'string' ? encoding : undefined);
+          const contentType = String(res.getHeader('content-type') || 'application/json; charset=utf-8');
+          if (lookupCacheEnabled && outgoingBuffer.length <= lookupCacheMaxBodyBytes && contentType.toLowerCase().includes('json')) {
+            cacheableResponseBody = Buffer.from(outgoingBuffer);
+            cacheableContentType = contentType;
+          }
+        }
+
+        captureChunk(outgoingChunk, encoding);
+        return originalEnd.call(this, outgoingChunk, encoding, callback);
       };
 
       res.on('finish', () => {
         const body = req.body && typeof req.body === 'object' ? req.body : {};
         const query = body.query && typeof body.query === 'object' ? body.query : undefined;
-        const responseInfo = collectResponseInfo(responseBytes, responseChunks, responseTruncated);
+        const responseInfo = collectResponseInfo(responseBytes, responseChunks, responseTruncated, dedupeInfo);
+        if (route === '/lookup' && lookupCacheEnabled && !lookupCacheHit && cacheableResponseBody && res.statusCode >= 200 && res.statusCode < 300 && lookupCacheTtlMs > 0 && lookupCacheMaxEntries > 0) {
+          const cacheKey = lookupRequestKey(req, body);
+          if (cacheKey) {
+            lookupCache.set(cacheKey, {
+              body: cacheableResponseBody,
+              contentType: cacheableContentType,
+              statusCode: res.statusCode,
+              expiresAt: Date.now() + lookupCacheTtlMs
+            });
+            while (lookupCache.size > lookupCacheMaxEntries) {
+              const oldestKey = lookupCache.keys().next().value;
+              lookupCache.delete(oldestKey);
+            }
+          }
+        }
         const record = {
           source: 'cars-safe-access',
           ts: new Date().toISOString(),
@@ -389,6 +524,10 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
           record.queryHash = query ? hashValue(query) : undefined;
           record.queryBytes = query ? byteLength(query) : 0;
           record.outputCount = responseInfo.outputCount;
+          record.originalOutputCount = responseInfo.originalOutputCount;
+          record.originalResponseBytes = responseInfo.originalResponseBytes;
+          record.dedupedResponseBytes = responseInfo.dedupedResponseBytes;
+          record.lookupCacheHit = lookupCacheHit;
         } else if (route === '/submit') {
           const topics = Array.isArray(body.topics) ? body.topics : (body.topic ? [body.topic] : []);
           record.topics = topics.map((topic) => String(topic)).sort();
@@ -399,6 +538,18 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
 
         console.log('CARS_SAFE_ACCESS ' + JSON.stringify(record));
       });
+
+      if (lookupCacheEnabled && cacheKeyAtStart) {
+        const cached = lookupCache.get(cacheKeyAtStart);
+        if (cached && cached.expiresAt > Date.now()) {
+          lookupCacheHit = true;
+          res.setHeader('X-CARS-Lookup-Cache', 'hit');
+          res.setHeader('Content-Type', cached.contentType || 'application/json; charset=utf-8');
+          res.status(cached.statusCode).send(cached.body);
+          return;
+        }
+        if (cached) lookupCache.delete(cacheKeyAtStart);
+      }
 
       next();
     };
