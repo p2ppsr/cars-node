@@ -16,6 +16,7 @@ const router = Router();
 const VALID_LOG_PERIODS = ['5m', '15m', '30m', '1h', '2h', '6h', '12h', '1d', '2d', '7d'] as const;
 const VALID_LOG_LEVELS = ['all', 'error', 'warn', 'info'] as const;
 const MAX_TAIL_LINES = 10000;
+const MAX_PAYMENT_CHUNK_SATS = parseInt(process.env.CARS_MAX_PAYMENT_CHUNK_SATS || '10000', 10);
 
 type LogPeriod = typeof VALID_LOG_PERIODS[number];
 type LogLevel = typeof VALID_LOG_LEVELS[number];
@@ -30,6 +31,29 @@ function isValidLogLevel(level: string): level is LogLevel {
 
 function sanitizeTailValue(tail: number): number {
     return Math.min(Math.max(1, Math.floor(tail)), MAX_TAIL_LINES);
+}
+
+function ok(res: Response, payload: Record<string, any> = {}, message = 'OK', status = 200) {
+    return res.status(status).json({
+        message,
+        ...payload,
+        data: payload
+    });
+}
+
+function validateTopUpAmount(amount: unknown) {
+    const parsed = Number(amount);
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+        return { valid: false, amount: 0, error: 'Invalid amount. Must be a positive integer number of satoshis.' };
+    }
+    if (parsed > MAX_PAYMENT_CHUNK_SATS) {
+        return {
+            valid: false,
+            amount: parsed,
+            error: `Amount exceeds max top-up chunk of ${MAX_PAYMENT_CHUNK_SATS} satoshis. Split the top-up into smaller chunks.`
+        };
+    }
+    return { valid: true, amount: parsed };
 }
 
 /**
@@ -162,12 +186,22 @@ router.post('/create', requireRegisteredUser, async (req: Request, res: Response
     });
 
     logger.info({ projectId, name }, 'Project created');
-    res.json({ projectId, message: 'Project created' });
+    return ok(res, { projectId }, 'Project created');
 });
 
 /**
- * TODO: THIS IS NOT YET ACTUALLY IMPLEMENTED
- * IT WILL USE THE NEW SERVICE MONETIZATION FRAMEWORK
+ * Quote current balance top-up constraints. Clients should split larger fills
+ * into chunks no larger than maxAmount so Authrite/payment headers stay small.
+ */
+router.post('/:projectId/pay/quote', requireRegisteredUser, requireProject, requireProjectAdmin, async (_req: Request, res: Response) => {
+    return ok(res, {
+        minAmount: 1,
+        maxAmount: MAX_PAYMENT_CHUNK_SATS,
+        currency: 'satoshis'
+    }, 'Top-up quote');
+});
+
+/**
  * Pay (add funds) to a project
  * @body { amount: number } - Amount in satoshis to add
  */
@@ -175,13 +209,18 @@ router.post('/:projectId/pay', requireRegisteredUser, requireProject, requirePro
     const { db }: { db: Knex } = req as any;
     const project = (req as any).project;
     const { amount } = req.body;
+    const validation = validateTopUpAmount(amount);
 
-    if (typeof amount !== 'number' || amount <= 0) {
-        return res.status(400).json({ error: 'Invalid amount. Must be a positive number.' });
+    if (!validation.valid) {
+        return res.status(400).json({
+            error: validation.error,
+            maxAmount: MAX_PAYMENT_CHUNK_SATS,
+            data: { maxAmount: MAX_PAYMENT_CHUNK_SATS }
+        });
     }
 
     const oldBalance = Number(project.balance);
-    const newBalance = oldBalance + amount;
+    const newBalance = oldBalance + validation.amount;
     await db('projects').where({ id: project.id }).update({ balance: newBalance });
 
     // Insert accounting record (credit)
@@ -189,14 +228,14 @@ router.post('/:projectId/pay', requireRegisteredUser, requireProject, requirePro
     await db('project_accounting').insert({
         project_id: project.id,
         type: 'credit',
-        amount_sats: amount,
+        amount_sats: validation.amount,
         balance_after: newBalance,
         metadata: JSON.stringify(metadata)
     });
 
     await db('logs').insert({
         project_id: project.id,
-        message: `Balance increased by ${amount}. New balance: ${newBalance}`
+        message: `Balance increased by ${validation.amount}. New balance: ${newBalance}`
     });
 
     // If balance was negative and now is >=0, re-enable ingress
@@ -215,7 +254,11 @@ router.post('/:projectId/pay', requireRegisteredUser, requireProject, requirePro
         }
     }
 
-    res.json({ message: `Paid ${amount} sats. New balance: ${newBalance}` });
+    return ok(res, {
+        amount: validation.amount,
+        balance: newBalance,
+        projectId: project.project_uuid
+    }, `Paid ${validation.amount} sats. New balance: ${newBalance}`);
 });
 
 /**
@@ -428,7 +471,11 @@ router.post('/:projectId/deploy', requireRegisteredUser, async (req: Request, re
     res.json({
         url: uploadUrl,
         deploymentId,
-        message: 'Deployment created'
+        message: 'Deployment created',
+        data: {
+            url: uploadUrl,
+            deploymentId
+        }
     });
 });
 
@@ -884,7 +931,10 @@ CARS System`;
 
         await sendDomainChangeEmail(emails, project, body, subject);
 
-        return res.json({ message: `${domainType.charAt(0).toUpperCase() + domainType.slice(1)} custom domain verified and set`, domain: normalizedDomain });
+        return ok(res, {
+            domain: normalizedDomain,
+            domainType
+        }, `${domainType.charAt(0).toUpperCase() + domainType.slice(1)} custom domain verified and set`);
     } catch (err: any) {
         // DNS query failed or some other error
         logger.error({ err: err.message }, 'Error during DNS verification process');

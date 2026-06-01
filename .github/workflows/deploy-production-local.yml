@@ -1,0 +1,49 @@
+name: Deploy Production Local
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Source SHA to deploy
+        required: false
+
+concurrency:
+  group: cars-node-prod-local
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on:
+      - self-hosted
+      - evans-creek-local-deploy
+      - linux-amd64
+      - docker
+      - kubectl
+      - local-registry
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build and push image
+        id: build
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+        run: scripts/k8s/build-local-image.sh
+
+      - name: Deploy to local Kubernetes
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+          IMAGE_TAG: ${{ steps.build.outputs.image_tag }}
+        run: scripts/k8s/deploy-local.sh

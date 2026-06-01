@@ -25,7 +25,13 @@ router.post('/register', async (req: Request, res: Response) => {
         }
 
         const userCount = await db('users').count('* as cnt').first();
-        res.json({ message: 'User registered', userCount: userCount.cnt });
+        res.json({
+            message: 'User registered',
+            userCount: userCount.cnt,
+            data: {
+                userCount: userCount.cnt
+            }
+        });
     } catch (e) {
         res.status(400).json({ message: 'Invalid or missing email certificate' })
     }

@@ -16,6 +16,8 @@ import { collectSystemHealth } from './health';
 
 const port = parseInt(process.env.CARS_NODE_PORT || '7777', 10);
 const uploadTimeout = process.env.CARS_UPLOAD_TIMEOUT || '6h';
+const jsonBodyLimit = process.env.CARS_JSON_BODY_LIMIT || '2mb';
+const maxPaymentChunkSats = parseInt(process.env.CARS_MAX_PAYMENT_CHUNK_SATS || '10000', 10);
 const MAINNET_PRIVATE_KEY = process.env.MAINNET_PRIVATE_KEY;
 const TESTNET_PRIVATE_KEY = process.env.TESTNET_PRIVATE_KEY;
 const INIT_K3S = process.env.INIT_K3S;
@@ -29,6 +31,33 @@ if (!process.env.TAAL_API_KEY_MAIN || !process.env.TAAL_API_KEY_TEST) {
 
 function haltOnTimedout(req, res, next) {
     if (!req.timedout) next()
+}
+
+function sanitizeForLog(value: any): any {
+    if (Array.isArray(value)) {
+        return value.map(sanitizeForLog);
+    }
+    if (value && typeof value === 'object' && !Buffer.isBuffer(value)) {
+        return Object.fromEntries(Object.entries(value).map(([key, entry]) => {
+            if (/key|token|secret|signature|authorization|password/i.test(key)) {
+                return [key, '[redacted]'];
+            }
+            return [key, sanitizeForLog(entry)];
+        }));
+    }
+    return value;
+}
+
+function topUpAmountFromRequest(req: any) {
+    if (!req.path.startsWith('/api/v1/project/') || !req.path.endsWith('/pay')) {
+        return 0;
+    }
+    const amount = Number(req.body?.amount);
+    if (!Number.isSafeInteger(amount) || amount <= 0 || amount > maxPaymentChunkSats) {
+        logger.warn({ path: req.path, amount, maxPaymentChunkSats }, 'Rejecting invalid CARS top-up payment amount before charging');
+        return 0;
+    }
+    return amount;
 }
 
 async function main() {
@@ -50,13 +79,14 @@ async function main() {
     startCronJobs(db, mainnetWallet, testnetWallet);
 
     const app = express();
+    app.set('trust proxy', true);
     const isUploadRequest = (req) => req.path.startsWith('/api/v1/upload/');
 
     app.use((req, res, next) => {
         if (isUploadRequest(req)) {
             return next();
         }
-        return bodyParser.json({ limit: '1gb' })(req, res, next);
+        return bodyParser.json({ limit: jsonBodyLimit })(req, res, next);
     });
     app.use((req, res, next) => {
         if (isUploadRequest(req)) {
@@ -126,7 +156,11 @@ async function main() {
         const startTime = Date.now();
 
         // Log incoming request details
-        logger.info({ method: req.method, url: req.url }, 'Incoming Request');
+        const requestId = (req.headers['x-request-id'] as string) || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+        (req as any).requestId = requestId;
+        res.setHeader('x-request-id', requestId);
+
+        logger.info({ requestId, method: req.method, url: req.url, remoteAddress: req.ip }, 'Incoming Request');
 
         // Handle request body
         if (req.body && Object.keys(req.body).length > 0) {
@@ -136,7 +170,7 @@ async function main() {
                 if (bodyString.length > 800) {
                     logger.info({ length: bodyString.length }, 'Request Body (object, truncated)')
                 } else {
-                    logger.info(req.body, 'Request Body')
+                    logger.info(sanitizeForLog(req.body), 'Request Body')
                 }
             } else if (Buffer.isBuffer(req.body)) {
                 bodyString = req.body.toString('utf8');
@@ -156,7 +190,7 @@ async function main() {
         // Log outgoing response details after the response is finished
         res.on('finish', () => {
             const duration = Date.now() - startTime;
-            logger.info({ method: req.method, url: req.url, statusCode: res.statusCode, duration }, 'Outgoing Response')
+            logger.info({ requestId, method: req.method, url: req.url, statusCode: res.statusCode, duration }, 'Outgoing Response')
 
             // Handle response body
             if (responseBody) {
@@ -166,7 +200,7 @@ async function main() {
                     if (bodyString.length > 800) {
                         logger.info({ length: bodyString.length }, 'Response Body (object, truncated)')
                     } else {
-                        logger.info(responseBody, 'Response Body')
+                        logger.info(sanitizeForLog(responseBody), 'Response Body')
                     }
                 } else if (Buffer.isBuffer(responseBody)) {
                     bodyString = responseBody.toString('utf8');
@@ -212,17 +246,11 @@ async function main() {
         // }
     }));
 
-    // Payment middleware (including request price calculator for balance top-ups), which uses mainnet wallet
+    // Payment middleware charges capped top-up chunks only. Larger balance fills are split by the CLI.
     app.use(createPaymentMiddleware({
         wallet: mainnetWallet,
         calculateRequestPrice: (req: any) => {
-            logger.info(`${req.path} .startsWith('/api/v1/project/') && req.path.endsWith('/pay')`)
-            if (req.path.startsWith('/api/v1/project/') && req.path.endsWith('/pay')) {
-                logger.info(`Request ${req.path} charging: ${req.body.amount} sats`)
-                return req.body.amount
-            } else {
-                return 0
-            }
+            return topUpAmountFromRequest(req);
         }
     }))
 
