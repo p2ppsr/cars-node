@@ -255,7 +255,10 @@ export default async (req: Request, res: Response) => {
 
     location / {
         add_header Cache-Control "no-cache" always;
-        try_files $uri /404.html /index.html;
+        # Serve an optional route-specific HTML shell (for example /learn.html)
+        # before falling back to the SPA. This preserves client-side routing while
+        # letting crawlers and social previews receive route-correct metadata.
+        try_files $uri $uri.html /404.html /index.html;
     }
 }`
       );
