@@ -24,4 +24,7 @@ spec:
               port: 7777
             periodSeconds: 10
             timeoutSeconds: 3
-            failureThreshold: 6
+            # Image builds currently run synchronously in the API process.
+            # Readiness removes that replica from traffic immediately; allow
+            # the build to finish instead of killing it after one minute.
+            failureThreshold: 60

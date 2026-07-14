@@ -5,7 +5,7 @@ import { Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import { Utils, type WalletInterface } from '@bsv/sdk';
 import type { Knex } from 'knex';
-import { execSync } from 'child_process';
+import { spawn } from 'child_process';
 import logger from '../logger';
 import {
   CARSConfig,
@@ -83,13 +83,22 @@ export default async (req: Request, res: Response) => {
   }
 
   // Helper to run commands with error handling
-  function runCmd(cmd: string, options: any = {}) {
-    try {
-      execSync(cmd, { stdio: 'inherit', ...options });
-    } catch (err: any) {
-      console.error(err);
-      throw new Error(`Command failed (${cmd}): ${err.message}`);
-    }
+  async function runCmd(cmd: string, options: any = {}) {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(cmd, {
+        shell: true,
+        stdio: 'inherit',
+        ...options
+      });
+      child.once('error', err => reject(new Error(`Command failed (${cmd}): ${err.message}`)));
+      child.once('exit', (code, signal) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(`Command failed (${cmd}): exited with ${signal ? `signal ${signal}` : `code ${code}`}`));
+      });
+    });
   }
 
   let deploy: any;
@@ -151,7 +160,7 @@ export default async (req: Request, res: Response) => {
     fs.ensureDirSync(uploadDir);
 
     // 7) Extract tarball
-    runCmd(`tar -xzf ${filePath} -C ${uploadDir}`);
+    await runCmd(`tar -xzf ${filePath} -C ${uploadDir}`);
     await logStep(`Tarball extracted at ${uploadDir}`);
 
     // 8) Validate deployment-info.json
@@ -273,9 +282,9 @@ EXPOSE 80`
       );
 
       // Build + push
-      runCmd(`buildah build --storage-driver=vfs  --isolation=chroot -t ${frontendImage} .`, { cwd: frontendDir });
+      await runCmd(`buildah build --storage-driver=vfs  --isolation=chroot -t ${frontendImage} .`, { cwd: frontendDir });
       await logStep(`Frontend image built: ${frontendImage}`);
-      runCmd(`buildah push --storage-driver=vfs --tls-verify=false ${frontendImage}`, { cwd: frontendDir });
+      await runCmd(`buildah push --storage-driver=vfs --tls-verify=false ${frontendImage}`, { cwd: frontendDir });
       await logStep(`Frontend image pushed: ${frontendImage}`);
     }
 
@@ -330,9 +339,9 @@ EXPOSE 80`
       fs.writeFileSync(path.join(backendDir, 'index.ts'), generateIndexTs(deploymentInfo));
 
       // Build + push
-      runCmd(`buildah build --storage-driver=vfs --isolation=chroot  -t ${backendImage} ${backendDir}`);
+      await runCmd(`buildah build --storage-driver=vfs --isolation=chroot  -t ${backendImage} ${backendDir}`);
       await logStep(`Backend image built: ${backendImage}`);
-      runCmd(`buildah push --tls-verify=false --storage-driver=vfs ${backendImage}`);
+      await runCmd(`buildah push --tls-verify=false --storage-driver=vfs ${backendImage}`);
       await logStep(`Backend image pushed: ${backendImage}`);
     }
 
@@ -1326,13 +1335,13 @@ spec:
 
     // 15) Deploy with Helm
     const helmTimeout = process.env.CARS_HELM_TIMEOUT || '20m';
-    runCmd(
+    await runCmd(
       `helm upgrade --install ${helmReleaseName} ${helmDir} --namespace ${namespace} --atomic --create-namespace --timeout ${helmTimeout}`
     );
     await logStep(`Helm release ${helmReleaseName} deployed for project ${project.project_uuid}`);
 
     // 16) Wait for the main deployment to roll out
-    runCmd(`kubectl rollout status deployment/${helmReleaseName}-deployment -n ${namespace} --timeout=${helmTimeout}`);
+    await runCmd(`kubectl rollout status deployment/${helmReleaseName}-deployment -n ${namespace} --timeout=${helmTimeout}`);
     await logStep(`Project ${project.project_uuid}, release ${deploymentId} rolled out successfully.`);
 
     // Log final URLs
