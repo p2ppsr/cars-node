@@ -165,35 +165,24 @@ router.post('/create', requireRegisteredUser, async (req: Request, res: Response
         suppressDefaultSyncAdvertisements: true
     };
 
-    await db.transaction(async trx => {
-        // The production database uses mysql2, where insert() returns an array
-        // containing the numeric insert id. Chaining returning('id') can instead
-        // produce a dialect-dependent object, which was then written directly to
-        // project_admins and left newly created projects without a usable admin.
-        const [insertedProjectId] = await trx('projects').insert({
-            project_uuid: projectId,
-            name: name || 'Unnamed Project',
-            balance: 0,
-            network: network === 'testnet' ? 'testnet' : 'mainnet',
-            private_key: privateKey,
-            engine_config: JSON.stringify(defaultEngineConfig),
-            admin_bearer_token: adminBearerToken
-        });
-        const projectDbId = Number(insertedProjectId);
+    const [projId] = await db('projects').insert({
+        project_uuid: projectId,
+        name: name || 'Unnamed Project',
+        balance: 0,
+        network: network === 'testnet' ? 'testnet' : 'mainnet',
+        private_key: privateKey,
+        engine_config: JSON.stringify(defaultEngineConfig),
+        admin_bearer_token: adminBearerToken
+    }, ['id']).returning('id');
 
-        if (!Number.isSafeInteger(projectDbId) || projectDbId <= 0) {
-            throw new Error('Project insert did not return a valid numeric id');
-        }
+    await db('project_admins').insert({
+        project_id: projId,
+        identity_key: identityKey
+    });
 
-        await trx('project_admins').insert({
-            project_id: projectDbId,
-            identity_key: identityKey
-        });
-
-        await trx('logs').insert({
-            project_id: projectDbId,
-            message: 'Project created'
-        });
+    await db('logs').insert({
+        project_id: projId.id,
+        message: 'Project created'
     });
 
     logger.info({ projectId, name }, 'Project created');
