@@ -25,6 +25,7 @@
         "@bsv/auth-express-middleware": "^2.0.4",
         "@bsv/payment-express-middleware": "^2.0.1",
         "@bsv/sdk": "^2.0.4",
+        "@bsv/wallet-toolbox": "^2.4.4",
         "@bsv/wallet-toolbox-client": "^2.0.20",
         "@sendgrid/mail": "^8.1.4",
         "@types/express": "^4.17.17",

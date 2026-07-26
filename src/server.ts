@@ -13,6 +13,7 @@ import { startCronJobs } from './cron';
 import timeout from 'connect-timeout';
 import { makeWallet } from './utils/wallet';
 import { collectSystemHealth } from './health';
+import { KnexSessionManager } from '@bsv/wallet-toolbox';
 
 const port = parseInt(process.env.CARS_NODE_PORT || '7777', 10);
 const uploadTimeout = process.env.CARS_UPLOAD_TIMEOUT || '6h';
@@ -72,6 +73,7 @@ async function main() {
     // We have two wallets: one on mainnet and one on testnet
     const mainnetWallet = await makeWallet('main', MAINNET_PRIVATE_KEY!)
     const testnetWallet = await makeWallet('test', TESTNET_PRIVATE_KEY!)
+    const authSessionManager = new KnexSessionManager(db);
 
     if (INIT_K3S) {
         await initCluster();
@@ -222,6 +224,7 @@ async function main() {
     // Authrite middleware
     app.use(createAuthMiddleware({
         wallet: mainnetWallet,
+        sessionManager: authSessionManager,
         onCertificatesReceived: async (identityKey, certs) => {
             try {
                 if (
