@@ -272,7 +272,7 @@ The intended path for new production deployments is shared DB mode. Before deplo
 kubectl apply -f k8s/shared-databases.yaml
 ```
 
-Replace the `CHANGE_ME` values in the manifest first. It creates `shared-mysql` in `cars-operator-system` as a 3-pod Percona XtraDB Cluster with 2 HAProxy pods and 100Gi Longhorn volumes, plus `shared-mongo` as 2 data members and 1 arbiter with 100Gi Longhorn volumes for the data members.
+Replace the `CHANGE_ME` values in the manifest first. It creates `shared-mysql` in `cars-operator-system` as a 3-pod Percona XtraDB Cluster with 2 HAProxy pods, 200Gi Longhorn volumes, and 7-day MySQL binary-log retention, plus `shared-mongo` as 2 data members and 1 arbiter with 100Gi Longhorn volumes for the data members.
 
 In shared mode, each project gets its own MySQL database, MongoDB database, and DB user/password, but no namespace-local PXC, HAProxy, MongoDB, arbiter, or DB PVCs. Existing lookup-service deployments may also need legacy overlay databases that are not selected by the `MONGO_URL` path; `SHARED_MONGO_ADDITIONAL_DATABASES` defaults to `CARS_lookup_services`, and the migration CLI copies those databases without renaming them. Set `CARS_PROJECT_DB_MODE=legacy-per-project` only if you need the older per-project database workload behavior.
 

@@ -34,13 +34,18 @@ spec:
     size: 3
     image: percona/percona-xtradb-cluster:8.0.42-33.1
     autoRecovery: true
+    configuration: |
+      [mysqld]
+      pxc_strict_mode=PERMISSIVE
+      max_allowed_packet=1G
+      binlog_expire_logs_seconds=604800
     resources:
       requests:
         cpu: "500m"
-        memory: "1Gi"
+        memory: "4Gi"
       limits:
         cpu: "2"
-        memory: "4Gi"
+        memory: "16Gi"
     tolerations:
       - key: "storage.longhorn.io/node"
         operator: "Equal"
@@ -74,7 +79,7 @@ spec:
           - ReadWriteOnce
         resources:
           requests:
-            storage: 100Gi
+            storage: 200Gi
   haproxy:
     enabled: true
     image: percona/haproxy:2.8.15
