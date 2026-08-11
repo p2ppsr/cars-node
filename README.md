@@ -56,7 +56,7 @@ In short, CARS Node takes your `deployment-info.json` and packaged artifacts and
 - **Shared Project Databases:** New backend deployments use operator-owned shared MySQL and MongoDB clusters by default, with per-project databases and users for isolation instead of per-project database pods and PVCs.
 - **Dynamic Ingress and SSL:** Uses `ingress-nginx`, `cert-manager`, and Let’s Encrypt to automatically provision custom domains and HTTPS certificates.
 - **Billing and Resource Usage Tracking:** Integrates with Prometheus to gather CPU, memory, disk, and network usage over time, billing projects automatically.
-- **Multiple Environment Support:** Supports mainnet and testnet keys, separate private keys, and network-specific TAAL API keys for transaction broadcast, merkle proof acquisition, and double spend detection.
+- **Multiple Environment Support:** Supports mainnet, testnet, and TerraTestNet project wallets. TTN deployments use Arcade for EF transaction broadcast and Arcade-backed go-chaintracks for proof/header validation, with no legacy ARC fallback.
 - **Identity and Project Management:** Integrates with the standard BSV identity system, ensuring only authorized admins can create or manage projects.
 - **Logging and Observability:** Centralized logs in MySQL, plus direct access to cluster-level frontend/backend logs via `kubectl` and API endpoints. In shared DB mode, MySQL and MongoDB logs are operator-managed rather than exposed to project tenants.
 - **Health and Readiness Visibility:** Public system health endpoints plus project-aware health reports that inspect Kubernetes readiness, sticky routing, database topology, and backend HTTP health.
@@ -99,7 +99,13 @@ CARS Node is configured via a `.env` file. Run:
 ```bash
 npm run setup
 ```
-This interactive script asks for all required environment variables, including `CARS_NODE_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE_URL`, `CARS_PROJECT_DB_MODE`, `SHARED_MYSQL_ADMIN_URL`, `SHARED_MONGO_ADMIN_URL`, `MAINNET_PRIVATE_KEY`, `TESTNET_PRIVATE_KEY`, `TAAL_API_KEY_MAIN`, `TAAL_API_KEY_TEST`, `K3S_TOKEN`, `DOCKER_HOST`, `DOCKER_REGISTRY`, `PROJECT_DEPLOYMENT_DNS_NAME`, `SENDGRID_API_KEY`, and more.
+This interactive script asks for all required environment variables, including `CARS_NODE_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE_URL`, `CARS_PROJECT_DB_MODE`, `SHARED_MYSQL_ADMIN_URL`, `SHARED_MONGO_ADMIN_URL`, `MAINNET_PRIVATE_KEY`, `TESTNET_PRIVATE_KEY`, optional `TTN_PRIVATE_KEY`, `TAAL_API_KEY_MAIN`, `TAAL_API_KEY_TEST`, the TTN Arcade/ChainTracks endpoints, `K3S_TOKEN`, `DOCKER_HOST`, `DOCKER_REGISTRY`, `PROJECT_DEPLOYMENT_DNS_NAME`, `SENDGRID_API_KEY`, and more.
+
+### TerraTestNet projects
+
+Set `TTN_PRIVATE_KEY` to enable project creation with `network: "teratestnet"` (the alias `ttn` is accepted at the API boundary). The node uses `TTN_STORAGE_URL` for that wallet. Generated TTN overlays receive `NETWORK=ttn`, `TTN_ARCADE_URL` (defaulting to the public TTN Arcade endpoint), and a go-chaintracks provider using `TTN_CHAINTRACKS_URL` or the same Arcade host. TTN never receives `ARC_API_KEY`, because legacy ARC's BEEF contract is not compatible with Arcade's EF `/tx` contract.
+
+The TTN funding key and its storage are isolated from the existing mainnet and testnet wallets. If `TTN_PRIVATE_KEY` is unset, existing networks continue to operate and TTN project creation returns a configuration error rather than silently falling back to mainnet.
 
 These variables control your server base URL, database credentials, private keys for blockchain operations, Docker registry configurations, and more. An example `.env` is provided for reference.
 
@@ -262,7 +268,7 @@ Integrate `cars build` and `cars release now` into CI pipelines. After pushing c
 
 ## Security Considerations
 
-- **Private Keys:** Keep `MAINNET_PRIVATE_KEY` and `TESTNET_PRIVATE_KEY` secure. These keys are used for blockchain operations.
+- **Private Keys:** Keep `MAINNET_PRIVATE_KEY`, `TESTNET_PRIVATE_KEY`, and optional `TTN_PRIVATE_KEY` secure. These keys are used for blockchain operations and must use network-isolated wallet storage.
 - **Admin Access:** Only authenticated, registered identities can manage projects. Carefully control who can become a project admin.
 - **HTTPS and Domain Verification:** Let’s Encrypt automation ensures end-to-end encryption for public endpoints.
 

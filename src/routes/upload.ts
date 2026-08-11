@@ -17,7 +17,7 @@ import {
   generateTsConfig,
   generateWaitScript,
 } from '../utils';
-import { findBalanceForKey, fundKey } from '../utils/wallet';
+import { findBalanceForKey, fundKey, walletForProjectNetwork, type ProjectWallets } from '../utils/wallet';
 import { sendDeploymentFailureEmail } from '../utils/email';
 import {
   ProjectDbCredentials,
@@ -26,6 +26,12 @@ import {
   getProjectDbMode,
   readProjectDbSecret,
 } from '../shared-db';
+import {
+  normalizeProjectNetwork,
+  projectNetworkToOverlayNetwork,
+  propagationEnvironmentForNetwork,
+  type ProjectNetwork,
+} from '../network';
 
 const projectsDomain: string = process.env.PROJECT_DEPLOYMENT_DNS_NAME!;
 
@@ -64,7 +70,11 @@ async function writeUploadToFile(req: Request, filePath: string) {
 }
 
 export default async (req: Request, res: Response) => {
-  const { db, mainnetWallet: wallet, testnetWallet }: { db: Knex, mainnetWallet: WalletInterface, testnetWallet: WalletInterface } = req as any;
+  const { db, mainnetWallet: wallet, projectWallets }: {
+    db: Knex;
+    mainnetWallet: WalletInterface;
+    projectWallets: ProjectWallets;
+  } = req as any;
   const { deploymentId, signature } = req.params;
 
   // Helper function to log steps to DB logs and logger
@@ -192,7 +202,16 @@ export default async (req: Request, res: Response) => {
       return res.status(400).json({ error: errMsg });
     }
 
-    if (carsConfig.network !== project.network) {
+    let deploymentNetwork: ProjectNetwork;
+    try {
+      deploymentNetwork = normalizeProjectNetwork(carsConfig.network);
+    } catch (error: any) {
+      const errMsg = error.message;
+      await logStep(errMsg, 'error');
+      return res.status(400).json({ error: errMsg });
+    }
+    const projectNetwork = normalizeProjectNetwork(project.network);
+    if (deploymentNetwork !== projectNetwork) {
       const errMsg = `Network mismatch: Project is on ${project.network} but deployment config specifies ${carsConfig.network}`;
       await logStep(errMsg, 'error');
       return res.status(400).json({ error: errMsg });
@@ -374,14 +393,24 @@ EXPOSE 80`
 
     // 13) Fund project key if it’s too low
     const projectServerPrivateKey = project.private_key;
-    const keyBalance = await findBalanceForKey(projectServerPrivateKey, project.network);
+    const keyBalance = await findBalanceForKey(projectServerPrivateKey, projectNetwork);
     if (keyBalance < 100) {
       try {
-        await fundKey(project.network === 'mainnet' ? wallet : testnetWallet, projectServerPrivateKey, 500, project.network);
+        await fundKey(
+          walletForProjectNetwork(projectWallets, projectNetwork),
+          projectServerPrivateKey,
+          500,
+          projectNetwork
+        );
       } catch (e) {
         logger.error(`Server could not fund a project private key on ${project.network}!`, e)
       }
     }
+
+    const overlayNetwork = projectNetworkToOverlayNetwork(projectNetwork);
+    const propagationProviderEnv = Object.entries(
+      propagationEnvironmentForNetwork(projectNetwork, project.project_uuid)
+    ).map(([name, value]) => `        - name: ${name}\n          value: ${yamlString(value)}\n`).join('');
 
     // 14) Generate Helm chart
     const helmDir = path.join(uploadDir, 'helm');
@@ -588,10 +617,8 @@ spec:
         - name: GASP_SYNC
           value: "${gaspSyncEnv}"
         - name: NETWORK
-          value: "${carsConfig.network}"
-        - name: ARC_API_KEY
-          value: "${project.network === 'mainnet' ? process.env.TAAL_API_KEY_MAIN : process.env.TAAL_API_KEY_TEST}"
-        - name: KNEX_URL
+          value: "${overlayNetwork}"
+${propagationProviderEnv}        - name: KNEX_URL
           valueFrom:
             secretKeyRef:
               name: {{ include "cars-project.fullname" . }}-db-connection

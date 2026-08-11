@@ -10,6 +10,7 @@ import { enableIngress } from '../utils/ingress';
 import axios from 'axios';
 import { collectProjectHealth } from '../health';
 import { getProjectDbMode, getSharedDbConfig } from '../shared-db';
+import { normalizeProjectNetwork } from '../network';
 
 const router = Router();
 
@@ -132,12 +133,22 @@ async function requireProjectAdminForDeploy(req: Request, res: Response, next: F
 
 /**
  * Create a new project
- * @body { name: string, network?: 'testnet'|'mainnet', privateKey?: string }
+ * @body { name: string, network?: 'mainnet'|'testnet'|'teratestnet'|'ttn', privateKey?: string }
  */
 router.post('/create', requireRegisteredUser, async (req: Request, res: Response) => {
     const { db }: { db: Knex } = req as any;
     const identityKey = (req as any).auth.identityKey;
     let { name, network, privateKey } = req.body;
+    try {
+        network = normalizeProjectNetwork(network);
+    } catch (error: any) {
+        return res.status(400).json({ error: error.message });
+    }
+    if (network === 'teratestnet' && !(req as any).ttnWallet) {
+        return res.status(503).json({
+            error: 'TerraTestNet projects are disabled because TTN_PRIVATE_KEY is not configured'
+        });
+    }
     const projectId = crypto.randomBytes(16).toString('hex');
 
     execSync(`kubectl create namespace cars-project-${projectId} || true`, { stdio: 'inherit' });
@@ -169,7 +180,7 @@ router.post('/create', requireRegisteredUser, async (req: Request, res: Response
         project_uuid: projectId,
         name: name || 'Unnamed Project',
         balance: 0,
-        network: network === 'testnet' ? 'testnet' : 'mainnet',
+        network,
         private_key: privateKey,
         engine_config: JSON.stringify(defaultEngineConfig),
         admin_bearer_token: adminBearerToken
@@ -185,7 +196,7 @@ router.post('/create', requireRegisteredUser, async (req: Request, res: Response
         message: 'Project created'
     });
 
-    logger.info({ projectId, name }, 'Project created');
+    logger.info({ projectId, name, network }, 'Project created');
     return ok(res, { projectId }, 'Project created');
 });
 

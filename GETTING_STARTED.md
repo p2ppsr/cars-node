@@ -253,6 +253,10 @@ When prompted, provide the necessary details. Important environment values:
 - `SHARED_MONGO_APP_HOSTS=shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017`
 - `SHARED_MONGO_ADDITIONAL_DATABASES=CARS_lookup_services` for legacy overlay lookup-service storage.
 - `MAINNET_PRIVATE_KEY` and `TESTNET_PRIVATE_KEY`: You’ll need to provide 64-char hex keys. Generate securely or use existing keys. Fund with at least 250,000 satoshis. [Use KeyFunder](https://keyfunder.babbage.systems). If testnet key funding isn't working (for now), just ignore and move on.
+- `TTN_PRIVATE_KEY`: Optional 64-char hex key that enables TerraTestNet projects. Fund it through `https://faucet-ttn.bsvblockchain.tech/` and keep it isolated from mainnet/testnet storage.
+- `TTN_STORAGE_URL`: TTN wallet storage endpoint; defaults to `https://staging-storage.babbage.systems`.
+- `TTN_ARCADE_URL`: TTN EF broadcaster; defaults to `https://arcade-v2-ttn-us-1.bsvblockchain.tech`.
+- `TTN_CHAINTRACKS_URL`: Optional dedicated go-chaintracks host; when empty, CARS uses `TTN_ARCADE_URL` with `TTN_CHAINTRACKS_API_PREFIX=/chaintracks/v2`.
 - `TAAL_API_KEY_MAIN` and `TAAL_API_KEY_TEST`: Obtain from TAAL (explained in next step).
 - `K3S_TOKEN=cars-token` (generate a random token)
 - `KUBECONFIG_FILE_PATH=/kubeconfig/kubeconfig.yaml` (will be created by cluster)

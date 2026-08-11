@@ -100,6 +100,8 @@ async function fetchHttpHealth(url: string) {
 export async function collectSystemHealth(db: Knex, options: {
     mainnetWalletReady: boolean;
     testnetWalletReady: boolean;
+    teratestnetWalletConfigured?: boolean;
+    teratestnetWalletReady?: boolean;
     migrationsComplete: boolean;
 }) {
     const checks = await Promise.all([
@@ -130,14 +132,21 @@ export async function collectSystemHealth(db: Knex, options: {
         }),
         runHealthCheck({
             name: 'wallets',
-            handler: async () => ({
-                status: options.mainnetWalletReady && options.testnetWalletReady ? 'ok' : 'error',
-                message: options.mainnetWalletReady && options.testnetWalletReady ? undefined : 'One or more wallets are not ready',
-                details: {
-                    mainnetWalletReady: options.mainnetWalletReady,
-                    testnetWalletReady: options.testnetWalletReady
-                }
-            })
+            handler: async () => {
+                const requiredWalletsReady = options.mainnetWalletReady && options.testnetWalletReady;
+                const teratestnetWalletReady = !options.teratestnetWalletConfigured || options.teratestnetWalletReady;
+                const walletsReady = requiredWalletsReady && teratestnetWalletReady;
+                return {
+                    status: walletsReady ? 'ok' : 'error',
+                    message: walletsReady ? undefined : 'One or more configured wallets are not ready',
+                    details: {
+                        mainnetWalletReady: options.mainnetWalletReady,
+                        testnetWalletReady: options.testnetWalletReady,
+                        teratestnetWalletConfigured: options.teratestnetWalletConfigured ?? false,
+                        teratestnetWalletReady: options.teratestnetWalletReady ?? false
+                    }
+                };
+            }
         }),
         runHealthCheck({
             name: 'projects',
