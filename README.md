@@ -121,7 +121,7 @@ kubectl apply -f k8s/shared-databases.yaml
 
 Before applying, replace the `CHANGE_ME` values in that manifest with generated credentials. The default deployment creates:
 
-- `shared-mysql`: a 3-pod Percona XtraDB Cluster with 2 HAProxy pods and 100Gi Longhorn-backed PXC volumes.
+- `shared-mysql`: a 3-pod Percona XtraDB Cluster with 2 HAProxy pods, 200Gi Longhorn-backed PXC volumes, and 7-day MySQL binary-log retention.
 - `shared-mongo`: a MongoDB replica set with 2 data-bearing members, 1 arbiter, and 100Gi Longhorn-backed data-member volumes.
 
 Then set:
