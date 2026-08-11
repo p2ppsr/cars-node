@@ -1,4 +1,5 @@
 import path from 'path';
+import { DEFAULT_TTN_ARCADE_URL, DEFAULT_TTN_CHAINTRACKS_API_PREFIX } from './network';
 
 /**
  * The shape of the "deployment-info.json" used by CARS
@@ -47,7 +48,12 @@ const main = async () => {
   // Basic server config
   server.configurePort(8080);
   server.configureVerboseRequestLogging(process.env.REQUEST_LOGGING === 'true');
-  server.configureNetwork(process.env.NETWORK === 'mainnet' ? 'main' : 'test');
+  const network = process.env.NETWORK === 'ttn' || process.env.NETWORK === 'teratestnet'
+    ? 'ttn'
+    : process.env.NETWORK === 'mainnet' || process.env.NETWORK === 'main'
+      ? 'main'
+      : 'test';
+  server.configureNetwork(network);
 
   // Databases
   await server.configureKnex(process.env.KNEX_URL!);
@@ -56,8 +62,23 @@ const main = async () => {
   // GASP enable/disable
   server.configureEnableGASPSync(process.env.GASP_SYNC === 'true');
 
-  // ARC (TAAL) API key
-  if (process.env.ARC_API_KEY) {
+  // TTN uses Arcade's EF /tx contract plus its go-chaintracks endpoint. It
+  // must never fall back to the incompatible legacy ARC BEEF contract.
+  const arcadeUrl = process.env.ARCADE_URL || (network === 'ttn' ? '${DEFAULT_TTN_ARCADE_URL}' : undefined);
+  if (arcadeUrl) {
+    server.configureArcade(arcadeUrl, {
+      apiKey: process.env.ARCADE_API_KEY || undefined,
+      deploymentId: process.env.ARCADE_DEPLOYMENT_ID || undefined,
+      chaintracksApiPrefix: process.env.CHAINTRACKS_API_PREFIX || '${DEFAULT_TTN_CHAINTRACKS_API_PREFIX}'
+    });
+  }
+  const chaintracksUrl = process.env.CHAINTRACKS_URL || (network === 'ttn' ? arcadeUrl : undefined);
+  if (chaintracksUrl) {
+    server.configureChaintracks(chaintracksUrl, {
+      apiPrefix: process.env.CHAINTRACKS_API_PREFIX || '${DEFAULT_TTN_CHAINTRACKS_API_PREFIX}'
+    });
+  }
+  if (network !== 'ttn' && process.env.ARC_API_KEY) {
     server.configureArcApiKey(process.env.ARC_API_KEY!);
   }
   if (process.env.ARC_CALLBACK_TOKEN) {
@@ -162,7 +183,7 @@ export function generatePackageJson(backendDependencies: Record<string, string>)
     "license": "ISC",
     "dependencies": {
       ...backendDependencies,
-      "@bsv/overlay-express": "2.5.1",
+      "@bsv/overlay-express": "2.6.0",
       "mysql2": "^3.11.5",
       "tsx": "^4.19.2",
       "chalk": "^5.3.0"

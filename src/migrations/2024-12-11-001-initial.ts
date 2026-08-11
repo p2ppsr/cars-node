@@ -15,7 +15,7 @@ export async function up(knex: Knex): Promise<void> {
         table.string('project_uuid', 32).unique().notNullable(); // hex id
         table.string('name', 255).notNullable();
         table.string('private_key', 64).notNullable();
-        table.string('network', 7).notNullable();
+        table.string('network', 12).notNullable();
         table.decimal('balance', 20, 8).defaultTo(0);
         table.string('web_ui_config');
         table.timestamp('created_at').defaultTo(knex.fn.now());

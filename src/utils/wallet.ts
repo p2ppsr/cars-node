@@ -3,25 +3,42 @@ import type { Knex } from 'knex';
 import logger from '../logger';
 import crypto from 'crypto';
 import { Services, StorageClient, Wallet, WalletSigner, WalletStorageManager } from '@bsv/wallet-toolbox-client';
+import {
+    ProjectNetwork,
+    WalletChain,
+    arcadeUrlForNetwork,
+    projectNetworkToWalletChain,
+    storageUrlForChain
+} from '../network';
 
-export async function makeWallet(chain: 'test' | 'main', privateKey: string): Promise<WalletInterface> {
+export type ProjectWallets = Partial<Record<ProjectNetwork, WalletInterface>>;
+
+export async function makeWallet(chain: WalletChain, privateKey: string): Promise<WalletInterface> {
     const keyDeriver = new CachedKeyDeriver(new PrivateKey(privateKey, 'hex'));
     const storageManager = new WalletStorageManager(keyDeriver.identityKey);
     const signer = new WalletSigner(chain, keyDeriver, storageManager);
-    const services = new Services(chain);
+    const serviceOptions = Services.createDefaultOptions(chain);
+    if (chain === 'ttn') {
+        serviceOptions.arcadeUrl = arcadeUrlForNetwork('teratestnet');
+        serviceOptions.arcadeConfig = {
+            ...serviceOptions.arcadeConfig,
+            apiKey: process.env.TTN_ARCADE_API_KEY || serviceOptions.arcadeConfig?.apiKey,
+            deploymentId: process.env.TTN_ARCADE_DEPLOYMENT_ID || serviceOptions.arcadeConfig?.deploymentId
+        };
+    }
+    const services = new Services(serviceOptions);
     const wallet = new Wallet(signer, services);
     const client = new StorageClient(
         wallet,
-        // Hard-code storage URLs for now, but this should be configurable in the future along with the private key.
-        chain === 'test' ? 'https://staging-storage.babbage.systems' : 'https://storage.babbage.systems'
+        storageUrlForChain(chain)
     );
     await client.makeAvailable();
     await storageManager.addWalletStorageProvider(client);
     return wallet;
 }
 
-export async function findBalanceForKey(privateKey: string, network: 'mainnet' | 'testnet' = 'mainnet'): Promise<number> {
-    const wallet = await makeWallet(network === 'mainnet' ? 'main' : 'test', privateKey);
+export async function findBalanceForKey(privateKey: string, network: ProjectNetwork = 'mainnet'): Promise<number> {
+    const wallet = await makeWallet(projectNetworkToWalletChain(network), privateKey);
     const { outputs: outputsInDefaultBasket } = await wallet.listOutputs({ basket: 'default', limit: 10000 });
     const balance = outputsInDefaultBasket.reduce((a, e) => a + e.satoshis, 0);
     return balance;
@@ -31,14 +48,14 @@ export async function fundKey(
     fromWallet: WalletInterface,
     toPrivateKey: string,
     amount: number,
-    network: 'mainnet' | 'testnet' = 'mainnet'
+    network: ProjectNetwork = 'mainnet'
 ): Promise<boolean> {
     const { outputs: outputsInDefaultBasket } = await fromWallet.listOutputs({ basket: 'default', limit: 10000 });
     const serverBalance = outputsInDefaultBasket.reduce((a, e) => a + e.satoshis, 0);
     if (serverBalance < amount) {
         throw new Error('Server balance is insufficient for funding');
     }
-    const toWallet = await makeWallet(network === 'mainnet' ? 'main' : 'test', toPrivateKey);
+    const toWallet = await makeWallet(projectNetworkToWalletChain(network), toPrivateKey);
     const derivationPrefix = crypto.randomBytes(10).toString('base64');
     const derivationSuffix = crypto.randomBytes(10).toString('base64');
     const { publicKey: payer } = await fromWallet.getPublicKey({ identityKey: true })
@@ -79,7 +96,15 @@ export async function fundKey(
     return true;
 }
 
-export async function checkAndFundProjectKeys(db: Knex, mainnetWalelt: WalletInterface, testnetWallet: WalletInterface) {
+export function walletForProjectNetwork(wallets: ProjectWallets, network: ProjectNetwork): WalletInterface {
+    const wallet = wallets[network];
+    if (!wallet) {
+        throw new Error(`${network} wallet is not configured on this CARS node`);
+    }
+    return wallet;
+}
+
+export async function checkAndFundProjectKeys(db: Knex, wallets: ProjectWallets) {
     const projects = await db('projects')
         .select('projects.*')
         .where('balance', '>', 0);
@@ -87,25 +112,24 @@ export async function checkAndFundProjectKeys(db: Knex, mainnetWalelt: WalletInt
     for (const project of projects) {
         try {
             const key = project.private_key;
-            const balance = await findBalanceForKey(key.private_key, project.network);
+            const network = project.network as ProjectNetwork;
+            const balance = await findBalanceForKey(key, network);
 
             if (balance < 100) {
                 const neededAmount = 500 - balance;
                 const fundingAmount = Math.min(neededAmount, project.balance);
                 if (fundingAmount <= 100) continue;
-                const sourceWallet = project.network === 'mainnet'
-                    ? mainnetWalelt
-                    : testnetWallet
+                const sourceWallet = walletForProjectNetwork(wallets, network);
 
                 const funded = await fundKey(
                     sourceWallet,
                     project.private_key,
                     fundingAmount,
-                    project.network
+                    network
                 );
 
                 if (funded) {
-                    if (key.network === 'mainnet') {
+                    if (network === 'mainnet') {
                         await db('projects')
                             .where({ id: project.id })
                             .decrement('balance', fundingAmount);

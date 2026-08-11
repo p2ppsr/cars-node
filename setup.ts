@@ -161,6 +161,50 @@ const envVars: EnvVarDefinition[] = [
         validate: (val) => val.trim().length === 64
     },
     {
+        key: 'TTN_PRIVATE_KEY',
+        description: 'Optional private key used to fund TerraTestNet projects. Leave empty to disable TTN project creation.',
+        default: '',
+        mask: true,
+        validate: (val) => val.trim().length === 0 || val.trim().length === 64
+    },
+    {
+        key: 'TTN_STORAGE_URL',
+        description: 'Wallet Storage endpoint used by the CARS TTN funding wallet.',
+        default: 'https://staging-storage.babbage.systems',
+        validate: (val) => val.startsWith('https://')
+    },
+    {
+        key: 'TTN_ARCADE_URL',
+        description: 'Arcade broadcaster and default ChainTracks host for TerraTestNet.',
+        default: 'https://arcade-v2-ttn-us-1.bsvblockchain.tech',
+        validate: (val) => val.startsWith('https://')
+    },
+    {
+        key: 'TTN_CHAINTRACKS_URL',
+        description: 'Optional dedicated go-chaintracks host. Defaults to TTN_ARCADE_URL when empty.',
+        default: '',
+        validate: (val) => val.length === 0 || val.startsWith('https://')
+    },
+    {
+        key: 'TTN_CHAINTRACKS_API_PREFIX',
+        description: 'go-chaintracks API prefix exposed by the TTN host.',
+        default: '/chaintracks/v2',
+        validate: (val) => val.startsWith('/')
+    },
+    {
+        key: 'TTN_ARCADE_API_KEY',
+        description: 'Optional server-level API key for the TTN Arcade endpoint.',
+        default: '',
+        mask: true,
+        validate: () => true
+    },
+    {
+        key: 'TTN_ARCADE_DEPLOYMENT_ID',
+        description: 'Optional Arcade deployment identifier for the CARS TTN funding wallet.',
+        default: '',
+        validate: () => true
+    },
+    {
         key: 'TAAL_API_KEY_MAIN',
         description: 'TAAL API key for mainnet Bitcoin transactions.',
         default: '',

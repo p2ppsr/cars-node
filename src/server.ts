@@ -14,6 +14,7 @@ import timeout from 'connect-timeout';
 import { makeWallet } from './utils/wallet';
 import { collectSystemHealth } from './health';
 import { KnexSessionManager } from '@bsv/wallet-toolbox';
+import type { ProjectWallets } from './utils/wallet';
 
 const port = parseInt(process.env.CARS_NODE_PORT || '7777', 10);
 const uploadTimeout = process.env.CARS_UPLOAD_TIMEOUT || '6h';
@@ -21,6 +22,7 @@ const jsonBodyLimit = process.env.CARS_JSON_BODY_LIMIT || '2mb';
 const maxPaymentChunkSats = parseInt(process.env.CARS_MAX_PAYMENT_CHUNK_SATS || '10000', 10);
 const MAINNET_PRIVATE_KEY = process.env.MAINNET_PRIVATE_KEY;
 const TESTNET_PRIVATE_KEY = process.env.TESTNET_PRIVATE_KEY;
+const TTN_PRIVATE_KEY = process.env.TTN_PRIVATE_KEY;
 const INIT_K3S = process.env.INIT_K3S;
 
 if (!MAINNET_PRIVATE_KEY || !TESTNET_PRIVATE_KEY) {
@@ -70,15 +72,22 @@ async function main() {
     logger.info('Migrations completed.');
     migrationsComplete = true;
 
-    // We have two wallets: one on mainnet and one on testnet
+    // Mainnet remains the authentication/payment wallet. Project funding uses
+    // the wallet matching each project's configured network.
     const mainnetWallet = await makeWallet('main', MAINNET_PRIVATE_KEY!)
     const testnetWallet = await makeWallet('test', TESTNET_PRIVATE_KEY!)
+    const ttnWallet = TTN_PRIVATE_KEY ? await makeWallet('ttn', TTN_PRIVATE_KEY) : undefined;
+    const projectWallets: ProjectWallets = {
+        mainnet: mainnetWallet,
+        testnet: testnetWallet,
+        ...(ttnWallet ? { teratestnet: ttnWallet } : {})
+    };
     const authSessionManager = new KnexSessionManager(db);
 
     if (INIT_K3S) {
         await initCluster();
     }
-    startCronJobs(db, mainnetWallet, testnetWallet);
+    startCronJobs(db, projectWallets);
 
     const app = express();
     app.set('trust proxy', true);
@@ -114,6 +123,8 @@ async function main() {
         (req as any).db = db;
         (req as any).mainnetWallet = mainnetWallet;
         (req as any).testnetWallet = testnetWallet;
+        (req as any).ttnWallet = ttnWallet;
+        (req as any).projectWallets = projectWallets;
         next();
     });
 
@@ -121,6 +132,8 @@ async function main() {
         const report = await collectSystemHealth(db, {
             mainnetWalletReady: true,
             testnetWalletReady: true,
+            teratestnetWalletConfigured: TTN_PRIVATE_KEY != null,
+            teratestnetWalletReady: ttnWallet != null,
             migrationsComplete
         });
         res.status(report.live ? 200 : 503).json(report);
@@ -130,6 +143,8 @@ async function main() {
         const report = await collectSystemHealth(db, {
             mainnetWalletReady: true,
             testnetWalletReady: true,
+            teratestnetWalletConfigured: TTN_PRIVATE_KEY != null,
+            teratestnetWalletReady: ttnWallet != null,
             migrationsComplete
         });
         res.status(report.ready ? 200 : 503).json(report);
@@ -139,6 +154,8 @@ async function main() {
         const report = await collectSystemHealth(db, {
             mainnetWalletReady: true,
             testnetWalletReady: true,
+            teratestnetWalletConfigured: TTN_PRIVATE_KEY != null,
+            teratestnetWalletReady: ttnWallet != null,
             migrationsComplete
         });
         res.status(report.ready ? 200 : 503).json(report);
