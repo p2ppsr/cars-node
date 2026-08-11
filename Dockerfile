@@ -2,7 +2,7 @@ FROM quay.io/buildah/stable:latest
 
 # Install Node.js and npm from NodeSource
 RUN dnf update -y && \
-    dnf install -y curl bash openssl shadow-utils && \
+    dnf install -y curl bash openssl shadow-utils gcc-c++ make && \
     curl -fsSL https://rpm.nodesource.com/setup_lts.x | bash - && \
     dnf install -y nodejs && \
     dnf clean all
