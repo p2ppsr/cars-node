@@ -219,24 +219,27 @@ async function main() {
       batch.push(advertisement);
       advertisementBatches.set(batchKey, batch);
     }
-    for (const protocolAdvertisements of advertisementBatches.values()) {
-      for (let offset = 0; offset < protocolAdvertisements.length; offset += 20) {
-        const batch = protocolAdvertisements.slice(offset, offset + 20);
-        const funded = await ensureRevocationBalance(project.private_key, network);
-        if (funded) {
-          logger.info({ projectId: project.project_uuid, network, funded },
-            'Funded legacy advertisement revocation batch');
-        }
-        const advertiser = new WalletAdvertiser(
-          chain,
-          project.private_key,
-          storageUrlForChain(chain),
-          batch[0].domain,
-        );
-        await advertiser.init();
-        await submit(await advertiser.revokeAdvertisements(batch));
-      }
+    // Submit at most one batch for an identity per pass. A signed revocation
+    // immediately becomes an unproven wallet action and may consume the
+    // wallet's only usable change output. Trying to construct the next
+    // protocol/domain batch before that action is proven can fail with
+    // WERR_INVALID_OPERATION. The next pass resumes after confirmation.
+    const protocolAdvertisements = advertisementBatches.values().next().value as Advertisement[] | undefined;
+    if (!protocolAdvertisements?.length) continue;
+    const batch = protocolAdvertisements.slice(0, 20);
+    const funded = await ensureRevocationBalance(project.private_key, network);
+    if (funded) {
+      logger.info({ projectId: project.project_uuid, network, funded },
+        'Funded legacy advertisement revocation batch');
     }
+    const advertiser = new WalletAdvertiser(
+      chain,
+      project.private_key,
+      storageUrlForChain(chain),
+      batch[0].domain,
+    );
+    await advertiser.init();
+    await submit(await advertiser.revokeAdvertisements(batch));
     if (submitOnly) {
       logger.info({ projectId: project.project_uuid, advertisements: advertisements.length },
         'Submitted legacy advertisements for retirement; retaining key until finalization');
