@@ -162,7 +162,10 @@ async function verifyNodeCoverage(nodeIdentityKey: string): Promise<void> {
 }
 
 async function main() {
-  const execute = process.argv.includes('--execute');
+  const submitOnly = process.argv.includes('--submit-only');
+  const finalizeOnly = process.argv.includes('--finalize-only');
+  if (submitOnly && finalizeOnly) throw new Error('--submit-only and --finalize-only are mutually exclusive');
+  const execute = process.argv.includes('--execute') || submitOnly || finalizeOnly;
   const nodePrivateKey = process.env.CARS_ADVERTISEMENT_PRIVATE_KEY;
   if (!nodePrivateKey) throw new Error('CARS_ADVERTISEMENT_PRIVATE_KEY is required');
   const nodeIdentityKey = new KeyDeriver(new PrivateKey(nodePrivateKey, 'hex')).identityKey;
@@ -192,8 +195,23 @@ async function main() {
       if (execute) await db('projects').where({ id: project.id }).update({ private_key: null });
       continue;
     }
+    if (finalizeOnly) {
+      logger.info({ projectId: project.project_uuid, advertisements: advertisements.length },
+        'Legacy advertisements are still awaiting retirement confirmation');
+      continue;
+    }
 
     const chain = projectNetworkToWalletChain(network);
+    const projectWallet = await makeWallet(chain, project.private_key);
+    const actions = await projectWallet.listActions({ labels: [], limit: 10_000 });
+    const pendingRevocations = actions.actions.filter(action =>
+      action.description === 'Revoke SHIP/SLAP advertisements' &&
+      (action.status === 'unproven' || action.status === 'sending'));
+    if (pendingRevocations.length) {
+      logger.info({ projectId: project.project_uuid, pendingRevocations: pendingRevocations.length },
+        'Retaining legacy key while revocation transactions await confirmation');
+      continue;
+    }
     const funded = await ensureRevocationBalance(project.private_key, network);
     if (funded) {
       logger.info({ projectId: project.project_uuid, network, funded }, 'Funded legacy advertisement revocation');
@@ -217,6 +235,11 @@ async function main() {
         await advertiser.init();
         await submit(await advertiser.revokeAdvertisements(batch));
       }
+    }
+    if (submitOnly) {
+      logger.info({ projectId: project.project_uuid, advertisements: advertisements.length },
+        'Submitted legacy advertisements for retirement; retaining key until finalization');
+      continue;
     }
     await verifyPublicAbsence(identityKey, network);
     await db('projects').where({ id: project.id }).update({ private_key: null });
