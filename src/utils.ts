@@ -33,14 +33,18 @@ export function generateIndexTs(info: CARSConfigInfo): string {
   const lookupServiceNames = JSON.stringify(Object.keys(info.lookupServices || {}));
   let imports = `
 import OverlayExpress from '@bsv/overlay-express'
+import crypto from 'crypto'
+import { PushDrop, Utils } from '@bsv/sdk'
 `;
 
   let mainFunction = `
 const main = async () => {
-  // Construct the OverlayExpress instance, including the admin bearer token if provided:
+  // The process key is only used for short-lived server authentication. CARS
+  // owns fleet advertisements under a separate controller key.
+  const runtimePrivateKey = crypto.randomBytes(32).toString('hex');
   const server = new OverlayExpress(
     \`CARS\`,
-    process.env.SERVER_PRIVATE_KEY!,
+    runtimePrivateKey,
     process.env.HOSTING_URL!,
     process.env.ADMIN_BEARER_TOKEN // 4th param is optional
   );
@@ -109,12 +113,31 @@ const main = async () => {
   }
 
   // Combine advanced options into EngineConfig
+  const passiveAdvertiser = {
+    createAdvertisements: async () => { throw new Error('Advertisements are managed by the CARS node'); },
+    findAllAdvertisements: async () => [],
+    revokeAdvertisements: async () => { throw new Error('Advertisements are managed by the CARS node'); },
+    parseAdvertisement: (outputScript: any) => {
+      const decoded = PushDrop.decode(outputScript);
+      const protocol = Utils.toUTF8(decoded.fields[0]);
+      if (decoded.fields.length < 4 || (protocol !== 'SHIP' && protocol !== 'SLAP')) {
+        throw new Error('Invalid SHIP/SLAP advertisement');
+      }
+      return {
+        protocol,
+        identityKey: Utils.toHex(decoded.fields[1]),
+        domain: Utils.toUTF8(decoded.fields[2]),
+        topicOrService: Utils.toUTF8(decoded.fields[3])
+      };
+    }
+  };
   server.configureEngineParams({
     logTime,
     logPrefix,
     throwOnBroadcastFailure,
     suppressDefaultSyncAdvertisements,
-    syncConfiguration: parsedSyncConfig
+    syncConfiguration: parsedSyncConfig,
+    advertiser: passiveAdvertiser
   });
 `;
 
@@ -154,7 +177,7 @@ const main = async () => {
       lookupServices: ${lookupServiceNames}
     })
   });
-  await server.configureEngine();
+  await server.configureEngine(false);
   await server.start();
 };
 
@@ -184,6 +207,7 @@ export function generatePackageJson(backendDependencies: Record<string, string>)
     "dependencies": {
       ...backendDependencies,
       "@bsv/overlay-express": "2.6.0",
+      "@bsv/sdk": "2.4.0",
       "mysql2": "^3.11.5",
       "tsx": "^4.19.2",
       "chalk": "^5.3.0"
@@ -272,6 +296,52 @@ exec "$@"`
 
 export function generateSafeAccessLoggerCjs() {
   return `'use strict';
+
+if (process.env.CARS_CENTRALIZED_ADVERTISEMENTS === 'true') {
+  const { createRequire } = require('module');
+  const appRequire = createRequire('/app/index.ts');
+  const crypto = require('crypto');
+  const overlayExpressModule = appRequire('@bsv/overlay-express');
+  const OverlayExpress = overlayExpressModule.default || overlayExpressModule;
+  const { Engine } = appRequire('@bsv/overlay');
+  const { PushDrop, Utils } = appRequire('@bsv/sdk');
+
+  // OverlayExpress requires a server authentication key even when it is not an
+  // advertiser. Keep it process-local and never place it in Kubernetes state.
+  process.env.SERVER_PRIVATE_KEY = crypto.randomBytes(32).toString('hex');
+
+  if (!OverlayExpress.prototype.__carsCentralizedAdvertisementsPatched) {
+    OverlayExpress.prototype.__carsCentralizedAdvertisementsPatched = true;
+    const originalConfigureEngine = OverlayExpress.prototype.configureEngine;
+    OverlayExpress.prototype.configureEngine = function carsConfigureThinEngine() {
+      const passiveAdvertiser = {
+        createAdvertisements: async () => { throw new Error('Advertisements are managed by the CARS node'); },
+        findAllAdvertisements: async () => [],
+        revokeAdvertisements: async () => { throw new Error('Advertisements are managed by the CARS node'); },
+        parseAdvertisement: (outputScript) => {
+          const decoded = PushDrop.decode(outputScript);
+          const protocol = Utils.toUTF8(decoded.fields[0]);
+          if (decoded.fields.length < 4 || (protocol !== 'SHIP' && protocol !== 'SLAP')) {
+            throw new Error('Invalid SHIP/SLAP advertisement');
+          }
+          return {
+            protocol,
+            identityKey: Utils.toHex(decoded.fields[1]),
+            domain: Utils.toUTF8(decoded.fields[2]),
+            topicOrService: Utils.toUTF8(decoded.fields[3])
+          };
+        }
+      };
+      this.configureEngineParams({ advertiser: passiveAdvertiser });
+      return originalConfigureEngine.call(this, false);
+    };
+  }
+
+  if (!Engine.prototype.__carsCentralizedAdvertisementsPatched) {
+    Engine.prototype.__carsCentralizedAdvertisementsPatched = true;
+    Engine.prototype.syncAdvertisements = async function carsNodeOwnsAdvertisements() {};
+  }
+}
 
 if (process.env.SAFE_REQUEST_LOGGING === 'true') {
   const { createRequire } = require('module');

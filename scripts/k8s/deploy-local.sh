@@ -14,14 +14,18 @@ registry_pull="${REGISTRY_PULL:-registry.cars-operator-system.svc.cluster.local:
 kubectl_cmd="${KUBECTL:-kubectl}"
 image="${registry_pull}/cars-node:${IMAGE_TAG}"
 
+"${kubectl_cmd}" apply -f k8s/advertisement-controller.yaml
 "${kubectl_cmd}" -n cars-operator-system set image deployment/cars "cars=${image}"
+"${kubectl_cmd}" -n cars-operator-system set image deployment/cars-advertisement-controller "controller=${image}"
 "${kubectl_cmd}" -n cars-operator-system annotate deployment/cars \
   "network-ops.babbage.systems/source-sha=${SOURCE_SHA:-unknown}" \
   "network-ops.babbage.systems/cars-node-image=${image}" \
   --overwrite
 "${kubectl_cmd}" -n cars-operator-system rollout status deployment/cars --timeout=15m
+"${kubectl_cmd}" -n cars-operator-system rollout status deployment/cars-advertisement-controller --timeout=15m
 
 curl --fail --show-error --silent https://cars.babbage.systems/health/live >/dev/null
 curl --fail --show-error --silent https://cars.babbage.systems/health/ready >/dev/null
+"${kubectl_cmd}" -n cars-operator-system get --raw "/api/v1/namespaces/cars-operator-system/services/http:cars-advertisement-controller:8081/proxy/health/ready" >/dev/null
 
 printf 'cars-node deployment completed for image %s\n' "${image}"

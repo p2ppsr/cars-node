@@ -133,12 +133,12 @@ async function requireProjectAdminForDeploy(req: Request, res: Response, next: F
 
 /**
  * Create a new project
- * @body { name: string, network?: 'mainnet'|'testnet'|'teratestnet'|'ttn', privateKey?: string }
+ * @body { name: string, network?: 'mainnet'|'testnet'|'teratestnet'|'ttn' }
  */
 router.post('/create', requireRegisteredUser, async (req: Request, res: Response) => {
     const { db }: { db: Knex } = req as any;
     const identityKey = (req as any).auth.identityKey;
-    let { name, network, privateKey } = req.body;
+    let { name, network } = req.body;
     try {
         network = normalizeProjectNetwork(network);
     } catch (error: any) {
@@ -153,16 +153,6 @@ router.post('/create', requireRegisteredUser, async (req: Request, res: Response
 
     execSync(`kubectl create namespace cars-project-${projectId} || true`, { stdio: 'inherit' });
     logger.info(`Namespace cars-project-${projectId} ensured.`);
-
-    // Generate a private key for the project if not provided
-    if (!privateKey) {
-        privateKey = crypto.randomBytes(32).toString('hex');
-    } else {
-        // Validate the provided private key: must be 64 lowercase hex characters
-        if (!/^[0-9a-f]{64}$/.test(privateKey)) {
-            return res.status(400).json({ error: 'Invalid private key' });
-        }
-    }
 
     // Generate a random admin bearer token for OverlayExpress
     const adminBearerToken = crypto.randomBytes(32).toString('hex');
@@ -181,7 +171,7 @@ router.post('/create', requireRegisteredUser, async (req: Request, res: Response
         name: name || 'Unnamed Project',
         balance: 0,
         network,
-        private_key: privateKey,
+        private_key: null,
         engine_config: JSON.stringify(defaultEngineConfig),
         admin_bearer_token: adminBearerToken
     }, ['id']).returning('id');
