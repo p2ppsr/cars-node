@@ -2,6 +2,7 @@ import axios from 'axios';
 import { KeyDeriver, LookupResolver, PrivateKey, Transaction, type TaggedBEEF } from '@bsv/sdk';
 import type { Advertisement } from '@bsv/overlay';
 import { WalletAdvertiser } from '@bsv/overlay-discovery-services';
+import { Services } from '@bsv/wallet-toolbox-client';
 import db from '../db';
 import logger from '../logger';
 import { normalizeProjectNetwork, projectNetworkToWalletChain, storageUrlForChain } from '../network';
@@ -11,8 +12,9 @@ import { findBalanceForKey, fundKey, makeWallet } from '../utils/wallet';
 const controllerUrl = process.env.ADVERTISEMENT_CONTROLLER_URL ||
   'http://cars-advertisement-controller.cars-operator-system.svc.cluster.local:8081';
 const parser = new PassiveAdvertiser();
-const REVOCATION_BALANCE = 2_000;
+const REVOCATION_BALANCE = 500;
 const fundingWallets = new Map<string, ReturnType<typeof makeWallet>>();
+const chainServices = new Map<string, Services>();
 
 async function ensureRevocationBalance(
   privateKey: string,
@@ -22,7 +24,7 @@ async function ensureRevocationBalance(
   if (balance >= REVOCATION_BALANCE) return 0;
   const chain = projectNetworkToWalletChain(network);
   const sourceKey = network === 'mainnet'
-    ? process.env.MAINNET_PRIVATE_KEY
+    ? process.env.CARS_ADVERTISEMENT_PRIVATE_KEY
     : network === 'testnet'
       ? process.env.TESTNET_PRIVATE_KEY
       : process.env.TTN_PRIVATE_KEY;
@@ -85,12 +87,46 @@ async function lookupPublic(
   return advertisements;
 }
 
+async function onlyUnspent(
+  advertisements: Advertisement[],
+  network: ReturnType<typeof normalizeProjectNetwork>,
+): Promise<Advertisement[]> {
+  const chain = projectNetworkToWalletChain(network);
+  let services = chainServices.get(network);
+  if (!services) {
+    services = new Services(chain);
+    chainServices.set(network, services);
+  }
+  const unspent: Advertisement[] = [];
+  const seen = new Set<string>();
+  for (const advertisement of advertisements) {
+    if (advertisement.beef === undefined || advertisement.outputIndex === undefined) {
+      throw new Error('Public advertisement is missing its outpoint data');
+    }
+    const tx = Transaction.fromBEEF(advertisement.beef);
+    const outpoint = `${tx.id('hex')}.${advertisement.outputIndex}`;
+    if (seen.has(outpoint)) continue;
+    seen.add(outpoint);
+    const output = tx.outputs[advertisement.outputIndex];
+    const status = await services.getUtxoStatus(
+      output.lockingScript.toHex(),
+      'script',
+      outpoint,
+    );
+    if (status.status !== 'success' || typeof status.isUtxo !== 'boolean') {
+      throw new Error(`Could not conclusively determine UTXO status for ${outpoint}`);
+    }
+    if (status.isUtxo) unspent.push(advertisement);
+  }
+  return unspent;
+}
+
 async function verifyPublicAbsence(
   identityKey: string,
   network: ReturnType<typeof normalizeProjectNetwork>,
 ): Promise<void> {
   for (let attempt = 1; attempt <= 12; attempt += 1) {
-    const remaining = await lookupPublic(identityKey, network);
+    const remaining = await onlyUnspent(await lookupPublic(identityKey, network), network);
     if (remaining.length === 0) return;
     if (attempt === 12) {
       throw new Error(`Legacy identity still has ${remaining.length} public advertisements`);
@@ -144,9 +180,14 @@ async function main() {
       throw new Error(`Refusing legacy revocation: project ${project.project_uuid} uses the controller identity`);
     }
     const network = normalizeProjectNetwork(project.network);
-    const advertisements = await lookupPublic(identityKey, network);
+    const discovered = await lookupPublic(identityKey, network);
+    const advertisements = await onlyUnspent(discovered, network);
     advertisementCount += advertisements.length;
-    logger.info({ projectId: project.project_uuid, advertisements: advertisements.length }, execute ? 'Revoking legacy advertisements' : 'Legacy advertisement revoke preview');
+    logger.info({
+      projectId: project.project_uuid,
+      advertisements: advertisements.length,
+      staleAdvertisements: discovered.length - advertisements.length,
+    }, execute ? 'Revoking legacy advertisements' : 'Legacy advertisement revoke preview');
     if (!execute || advertisements.length === 0) {
       if (execute) await db('projects').where({ id: project.id }).update({ private_key: null });
       continue;
