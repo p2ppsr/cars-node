@@ -194,6 +194,12 @@ export class AdvertisementReconciler {
     const action = await wallet.createAction({
       outputs,
       description: 'CARS fleet SHIP/SLAP advertisement issuance',
+      options: {
+        // The storage provider already knows every node-wallet ancestor. A
+        // txid-only parent is sufficient and prevents an unrelated long-lived
+        // funding chain from bloating this fleet advertisement BEEF.
+        trustSelf: 'known',
+      },
     });
     if (!action.tx) throw new Error('Fleet advertisement createAction did not return a transaction');
     const transaction = Transaction.fromAtomicBEEF(action.tx);
