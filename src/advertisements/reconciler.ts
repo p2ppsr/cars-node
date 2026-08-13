@@ -1,9 +1,10 @@
-import { KeyDeriver, PrivateKey, Transaction, type LookupQuestion, type TaggedBEEF } from '@bsv/sdk';
+import { KeyDeriver, PrivateKey, PushDrop, Transaction, Utils, type LookupQuestion, type TaggedBEEF } from '@bsv/sdk';
 import type { Advertisement, Engine } from '@bsv/overlay';
 import { WalletAdvertiser } from '@bsv/overlay-discovery-services';
 import type { Knex } from 'knex';
 import logger from '../logger';
 import { storageUrlForChain, type ProjectNetwork, type WalletChain } from '../network';
+import { makeWallet } from '../utils/wallet';
 import { PassiveAdvertiser } from './passive-advertiser';
 
 export interface DesiredAdvertisement {
@@ -37,7 +38,6 @@ function toChain(network: ProjectNetwork): WalletChain {
 export class AdvertisementReconciler {
   readonly identityKey: string;
   private readonly passiveAdvertiser = new PassiveAdvertiser();
-  private readonly advertisers = new Map<string, Promise<WalletAdvertiser>>();
   private running = false;
 
   constructor(
@@ -112,20 +112,10 @@ export class AdvertisementReconciler {
 
       // Create first. A transient failure can leave duplicates during migration,
       // but it cannot remove the fleet's last valid advertisement.
-      const byDomain = new Map<string, DesiredAdvertisement[]>();
-      for (const ad of missing) {
-        const group = byDomain.get(ad.domain) || [];
-        group.push(ad);
-        byDomain.set(ad.domain, group);
-      }
-      for (const [domain, advertisements] of byDomain) {
-        const advertiser = await this.advertiserForDomain(domain);
-        const taggedBEEF = await advertiser.createAdvertisements(advertisements.map(ad => ({
-          protocol: ad.protocol,
-          topicOrServiceName: ad.capability,
-        })));
-        await this.submitAndRecord('create', advertisements, taggedBEEF);
-        created += advertisements.length;
+      if (missing.length > 0) {
+        const taggedBEEF = await this.createFleetAdvertisements(missing);
+        await this.submitAndRecord('create', missing, taggedBEEF);
+        created = missing.length;
       }
 
       // Re-read from authoritative local discovery state before calculating
@@ -172,22 +162,45 @@ export class AdvertisementReconciler {
     }
   }
 
-  private advertiserForDomain(domain: string): Promise<WalletAdvertiser> {
-    let advertiser = this.advertisers.get(domain);
-    if (!advertiser) {
-      advertiser = (async () => {
-        const instance = new WalletAdvertiser(
-          toChain(this.network),
-          this.privateKey,
-          storageUrlForChain(toChain(this.network)),
-          domain,
-        );
-        await instance.init();
-        return instance;
-      })();
-      this.advertisers.set(domain, advertiser);
-    }
-    return advertiser;
+  private async advertiserForDomain(domain: string): Promise<WalletAdvertiser> {
+    const instance = new WalletAdvertiser(
+      toChain(this.network),
+      this.privateKey,
+      storageUrlForChain(toChain(this.network)),
+      domain,
+    );
+    await instance.init();
+    return instance;
+  }
+
+  /**
+   * WalletAdvertiser binds one domain per instance. CARS needs one transaction
+   * spanning many backend domains, so build each output with its domain-bound
+   * advertiser and combine all outputs into one node-wallet createAction.
+   */
+  private async createFleetAdvertisements(advertisements: DesiredAdvertisement[]): Promise<TaggedBEEF> {
+    const wallet = await makeWallet(toChain(this.network), this.privateKey);
+    const pushDrop = new PushDrop(wallet);
+    const outputs = await Promise.all(advertisements.map(async advertisement => ({
+      lockingScript: (await pushDrop.lock([
+        Utils.toArray(advertisement.protocol, 'utf8'),
+        Utils.toArray(this.identityKey, 'hex'),
+        Utils.toArray(advertisement.domain, 'utf8'),
+        Utils.toArray(advertisement.capability, 'utf8'),
+      ], [2, advertisement.protocol === 'SHIP' ? 'service host interconnect' : 'service lookup availability'], '1', 'anyone', true)).toHex(),
+      satoshis: 1,
+      outputDescription: `${advertisement.protocol} advertisement of ${advertisement.capability}`,
+    })));
+    const action = await wallet.createAction({
+      outputs,
+      description: 'CARS fleet SHIP/SLAP advertisement issuance',
+    });
+    if (!action.tx) throw new Error('Fleet advertisement createAction did not return a transaction');
+    const transaction = Transaction.fromAtomicBEEF(action.tx);
+    return {
+      beef: transaction.toBEEF(),
+      topics: [...new Set(advertisements.map(ad => ad.protocol === 'SHIP' ? 'tm_ship' : 'tm_slap'))],
+    };
   }
 
   private async submitAndRecord(
