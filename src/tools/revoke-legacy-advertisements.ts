@@ -6,10 +6,36 @@ import db from '../db';
 import logger from '../logger';
 import { normalizeProjectNetwork, projectNetworkToWalletChain, storageUrlForChain } from '../network';
 import { PassiveAdvertiser } from '../advertisements/passive-advertiser';
+import { findBalanceForKey, fundKey, makeWallet } from '../utils/wallet';
 
 const controllerUrl = process.env.ADVERTISEMENT_CONTROLLER_URL ||
   'http://cars-advertisement-controller.cars-operator-system.svc.cluster.local:8081';
 const parser = new PassiveAdvertiser();
+const REVOCATION_BALANCE = 2_000;
+const fundingWallets = new Map<string, ReturnType<typeof makeWallet>>();
+
+async function ensureRevocationBalance(
+  privateKey: string,
+  network: ReturnType<typeof normalizeProjectNetwork>,
+): Promise<number> {
+  const balance = await findBalanceForKey(privateKey, network);
+  if (balance >= REVOCATION_BALANCE) return 0;
+  const chain = projectNetworkToWalletChain(network);
+  const sourceKey = network === 'mainnet'
+    ? process.env.MAINNET_PRIVATE_KEY
+    : network === 'testnet'
+      ? process.env.TESTNET_PRIVATE_KEY
+      : process.env.TTN_PRIVATE_KEY;
+  if (!sourceKey) throw new Error(`No CARS funding wallet is configured for ${network}`);
+  let sourceWallet = fundingWallets.get(network);
+  if (!sourceWallet) {
+    sourceWallet = makeWallet(chain, sourceKey);
+    fundingWallets.set(network, sourceWallet);
+  }
+  const amount = REVOCATION_BALANCE - balance;
+  await fundKey(await sourceWallet, privateKey, amount, network);
+  return amount;
+}
 
 async function lookupController(identityKey: string, protocol: 'SHIP' | 'SLAP'): Promise<Advertisement[]> {
   const response = await axios.post(`${controllerUrl}/lookup`, {
@@ -127,6 +153,10 @@ async function main() {
     }
 
     const chain = projectNetworkToWalletChain(network);
+    const funded = await ensureRevocationBalance(project.private_key, network);
+    if (funded) {
+      logger.info({ projectId: project.project_uuid, network, funded }, 'Funded legacy advertisement revocation');
+    }
     const advertisementsByDomain = new Map<string, Advertisement[]>();
     for (const advertisement of advertisements) {
       const domainAdvertisements = advertisementsByDomain.get(advertisement.domain) || [];
