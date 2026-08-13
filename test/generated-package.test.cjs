@@ -23,3 +23,25 @@ test('generated overlays configure TTN Arcade and ChainTracks without ARC fallba
   assert.match(generated, /network !== 'ttn' && process\.env\.ARC_API_KEY/)
   assert.match(generated, /https:\/\/arcade-v2-ttn-us-1\.bsvblockchain\.tech/)
 })
+
+test('generated project backends are thin advertisement consumers', () => {
+  const { generateIndexTs, generatePackageJson } = require('../dist/src/utils.js')
+  const generated = generateIndexTs({ schema: 'bsv-app', schemaVersion: '1.0' })
+  const packageJson = generatePackageJson({})
+
+  assert.match(generated, /crypto\.randomBytes\(32\)/)
+  assert.match(generated, /advertiser: passiveAdvertiser/)
+  assert.match(generated, /server\.configureEngine\(false\)/)
+  assert.doesNotMatch(generated, /process\.env\.SERVER_PRIVATE_KEY/)
+  assert.equal(packageJson.dependencies['@bsv/sdk'], '2.4.0')
+})
+
+test('legacy preload disables local discovery services and advertisement writes', () => {
+  const { generateSafeAccessLoggerCjs } = require('../dist/src/utils.js')
+  const preload = generateSafeAccessLoggerCjs()
+
+  assert.match(preload, /CARS_CENTRALIZED_ADVERTISEMENTS/)
+  assert.match(preload, /originalConfigureEngine\.call\(this, false\)/)
+  assert.match(preload, /Engine\.prototype\.syncAdvertisements/)
+  assert.match(preload, /crypto\.randomBytes\(32\)/)
+})

@@ -1,6 +1,6 @@
 {
     "name": "@p2ppsr/cars-node",
-    "version": "1.3.23",
+    "version": "1.4.0",
     "repository": {
         "type": "git",
         "url": "https://github.com/p2ppsr/cars-node"
@@ -17,6 +17,9 @@
         "build": "tsc -p tsconfig.json",
         "test": "npm run build && node --test test/*.test.cjs",
         "migrate:shared-db": "tsx src/tools/migrate-shared-db.ts",
+        "seed:advertisements": "node dist/src/tools/seed-advertisement-registry.js",
+        "revoke:legacy-advertisements": "node dist/src/tools/revoke-legacy-advertisements.js",
+        "start:advertisements": "node dist/src/advertisement-controller.js",
         "start:dev": "tsx watch src/server.ts",
         "start:prod": "node dist/src/server.js",
         "setup": "node dist/setup.js",
@@ -27,6 +30,9 @@
     },
     "dependencies": {
         "@bsv/auth-express-middleware": "^2.0.4",
+        "@bsv/overlay": "2.3.0",
+        "@bsv/overlay-discovery-services": "2.2.0",
+        "@bsv/overlay-express": "2.6.0",
         "@bsv/payment-express-middleware": "^2.0.1",
         "@bsv/sdk": "2.4.0",
         "@bsv/wallet-toolbox": "2.7.0",

@@ -17,7 +17,6 @@ import {
   generateTsConfig,
   generateWaitScript,
 } from '../utils';
-import { findBalanceForKey, fundKey, walletForProjectNetwork, type ProjectWallets } from '../utils/wallet';
 import { sendDeploymentFailureEmail } from '../utils/email';
 import {
   ProjectDbCredentials,
@@ -32,6 +31,7 @@ import {
   propagationEnvironmentForNetwork,
   type ProjectNetwork,
 } from '../network';
+import { inspectProjectCapabilities, replaceProjectCapabilities } from '../advertisements/registry';
 
 const projectsDomain: string = process.env.PROJECT_DEPLOYMENT_DNS_NAME!;
 
@@ -70,10 +70,9 @@ async function writeUploadToFile(req: Request, filePath: string) {
 }
 
 export default async (req: Request, res: Response) => {
-  const { db, mainnetWallet: wallet, projectWallets }: {
+  const { db, mainnetWallet: wallet }: {
     db: Knex;
     mainnetWallet: WalletInterface;
-    projectWallets: ProjectWallets;
   } = req as any;
   const { deploymentId, signature } = req.params;
 
@@ -391,22 +390,6 @@ EXPOSE 80`
     const adminBearerTokenEnv = project.admin_bearer_token || '';
     const suppressDefaultSyncAdvertisements = engineConfigObj.suppressDefaultSyncAdvertisements === false ? 'false' : 'true';
 
-    // 13) Fund project key if it’s too low
-    const projectServerPrivateKey = project.private_key;
-    const keyBalance = await findBalanceForKey(projectServerPrivateKey, projectNetwork);
-    if (keyBalance < 100) {
-      try {
-        await fundKey(
-          walletForProjectNetwork(projectWallets, projectNetwork),
-          projectServerPrivateKey,
-          500,
-          projectNetwork
-        );
-      } catch (e) {
-        logger.error(`Server could not fund a project private key on ${project.network}!`, e)
-      }
-    }
-
     const overlayNetwork = projectNetworkToOverlayNetwork(projectNetwork);
     const propagationProviderEnv = Object.entries(
       propagationEnvironmentForNetwork(projectNetwork, project.project_uuid)
@@ -523,7 +506,7 @@ stringData:
   MYSQL_OPERATOR_PASSWORD: "operator-password"
   MONGO_ROOT_USERNAME: "root"
   MONGO_ROOT_PASSWORD: "rootpassword"
-  MONGO_RS_KEY: "${projectServerPrivateKey}${projectServerPrivateKey}${projectServerPrivateKey}"
+  MONGO_RS_KEY: "${adminBearerTokenEnv}${adminBearerTokenEnv}${adminBearerTokenEnv}"
 {{- end }}
 `
     );
@@ -606,8 +589,6 @@ spec:
       - name: backend
         image: {{ .Values.backendImage }}
         env:
-        - name: SERVER_PRIVATE_KEY
-          value: "${projectServerPrivateKey}"
         - name: HOSTING_URL
           value: "{{ .Values.ingressHostBackend }}"
         - name: REQUEST_LOGGING
@@ -1370,6 +1351,29 @@ spec:
     // 16) Wait for the main deployment to roll out
     await runCmd(`kubectl rollout status deployment/${helmReleaseName}-deployment -n ${namespace} --timeout=${helmTimeout}`);
     await logStep(`Project ${project.project_uuid}, release ${deploymentId} rolled out successfully.`);
+
+    // The release itself is the source of truth for the capabilities the node
+    // advertises. Only publish registry changes after the new backend is ready.
+    let deployedCapabilities = { topicManagers: [] as string[], lookupServices: [] as string[] };
+    if (backendEnabled) {
+      const internalBackendUrl = `http://${helmReleaseName}-service.${namespace}.svc.cluster.local:8080`;
+      deployedCapabilities = await inspectProjectCapabilities(internalBackendUrl);
+      const expectedTopics = Object.keys(deploymentInfo.topicManagers || {});
+      const expectedServices = Object.keys(deploymentInfo.lookupServices || {});
+      const missingTopics = expectedTopics.filter(name => !deployedCapabilities.topicManagers.includes(name));
+      const missingServices = expectedServices.filter(name => !deployedCapabilities.lookupServices.includes(name));
+      if (missingTopics.length || missingServices.length) {
+        throw new Error(`Deployed capability verification failed: missing topics=${missingTopics.join(',')} services=${missingServices.join(',')}`);
+      }
+    }
+    await replaceProjectCapabilities(db, {
+      projectId: project.id,
+      deployId: deploy.id,
+      network: projectNetwork,
+      domain: valuesObj.ingressHostBackend,
+      capabilities: deployedCapabilities,
+    });
+    await logStep(`CARS node advertisement registry updated with ${deployedCapabilities.topicManagers.length} topics and ${deployedCapabilities.lookupServices.length} lookup services.`);
 
     // Log final URLs
     if (frontendEnabled) {

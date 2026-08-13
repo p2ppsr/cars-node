@@ -112,6 +112,7 @@ export async function checkAndFundProjectKeys(db: Knex, wallets: ProjectWallets)
     for (const project of projects) {
         try {
             const key = project.private_key;
+            if (typeof key !== 'string' || key.length !== 64) continue;
             const network = project.network as ProjectNetwork;
             const balance = await findBalanceForKey(key, network);
 
