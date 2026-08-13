@@ -1370,7 +1370,7 @@ spec:
       projectId: project.id,
       deployId: deploy.id,
       network: projectNetwork,
-      domain: valuesObj.ingressHostBackend,
+      domain: `https://${valuesObj.ingressHostBackend}`,
       capabilities: deployedCapabilities,
     });
     await logStep(`CARS node advertisement registry updated with ${deployedCapabilities.topicManagers.length} topics and ${deployedCapabilities.lookupServices.length} lookup services.`);

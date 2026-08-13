@@ -11,7 +11,7 @@ const controllerUrl = process.env.ADVERTISEMENT_CONTROLLER_URL ||
   'http://cars-advertisement-controller.cars-operator-system.svc.cluster.local:8081';
 const parser = new PassiveAdvertiser();
 
-async function lookup(identityKey: string, protocol: 'SHIP' | 'SLAP'): Promise<Advertisement[]> {
+async function lookupController(identityKey: string, protocol: 'SHIP' | 'SLAP'): Promise<Advertisement[]> {
   const response = await axios.post(`${controllerUrl}/lookup`, {
     service: protocol === 'SHIP' ? 'ls_ship' : 'ls_slap',
     query: { identityKey, limit: 10_000 },
@@ -25,6 +25,20 @@ async function lookup(identityKey: string, protocol: 'SHIP' | 'SLAP'): Promise<A
     advertisements.push({ ...advertisement, beef, outputIndex: output.outputIndex });
   }
   return advertisements;
+}
+
+async function lookupPublic(
+  privateKey: string,
+  network: ReturnType<typeof normalizeProjectNetwork>,
+  domain: string,
+): Promise<Advertisement[]> {
+  const chain = projectNetworkToWalletChain(network);
+  const advertiser = new WalletAdvertiser(chain, privateKey, storageUrlForChain(chain), domain);
+  await advertiser.init();
+  return [
+    ...await advertiser.findAllAdvertisements('SHIP'),
+    ...await advertiser.findAllAdvertisements('SLAP'),
+  ];
 }
 
 async function submit(taggedBEEF: TaggedBEEF): Promise<void> {
@@ -43,8 +57,8 @@ async function verifyNodeCoverage(nodeIdentityKey: string): Promise<void> {
     .select('protocol', 'domain', 'capability')
     .where({ active: true });
   const observed = [
-    ...await lookup(nodeIdentityKey, 'SHIP'),
-    ...await lookup(nodeIdentityKey, 'SLAP'),
+    ...await lookupController(nodeIdentityKey, 'SHIP'),
+    ...await lookupController(nodeIdentityKey, 'SLAP'),
   ];
   const observedKeys = new Set(observed.map(ad => `${ad.protocol}\u0000${ad.domain}\u0000${ad.topicOrService}`));
   const missing = desired.filter(ad => !observedKeys.has(`${ad.protocol}\u0000${ad.domain}\u0000${ad.capability}`));
@@ -68,10 +82,9 @@ async function main() {
   let advertisementCount = 0;
   for (const project of projects) {
     const identityKey = new KeyDeriver(new PrivateKey(project.private_key, 'hex')).identityKey;
-    const advertisements = [
-      ...await lookup(identityKey, 'SHIP'),
-      ...await lookup(identityKey, 'SLAP'),
-    ];
+    const network = normalizeProjectNetwork(project.network);
+    const projectDomain = `https://backend.${project.project_uuid}.${process.env.PROJECT_DEPLOYMENT_DNS_NAME}`;
+    const advertisements = await lookupPublic(project.private_key, network, projectDomain);
     advertisementCount += advertisements.length;
     logger.info({ projectId: project.project_uuid, advertisements: advertisements.length }, execute ? 'Revoking legacy advertisements' : 'Legacy advertisement revoke preview');
     if (!execute || advertisements.length === 0) {
@@ -79,7 +92,6 @@ async function main() {
       continue;
     }
 
-    const network = normalizeProjectNetwork(project.network);
     const chain = projectNetworkToWalletChain(network);
     for (let offset = 0; offset < advertisements.length; offset += 20) {
       const batch = advertisements.slice(offset, offset + 20);
@@ -93,8 +105,8 @@ async function main() {
       await submit(await advertiser.revokeAdvertisements(batch));
     }
     const remaining = [
-      ...await lookup(identityKey, 'SHIP'),
-      ...await lookup(identityKey, 'SLAP'),
+      ...await lookupController(identityKey, 'SHIP'),
+      ...await lookupController(identityKey, 'SLAP'),
     ];
     if (remaining.length) {
       throw new Error(`Legacy identity for ${project.project_uuid} still has ${remaining.length} advertisements`);

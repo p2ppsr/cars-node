@@ -30,7 +30,7 @@ async function main() {
     await replaceProjectCapabilities(db, {
       projectId: project.id,
       network: normalizeProjectNetwork(project.network),
-      domain: `backend.${projectUuid}.${process.env.PROJECT_DEPLOYMENT_DNS_NAME}`,
+      domain: `https://backend.${projectUuid}.${process.env.PROJECT_DEPLOYMENT_DNS_NAME}`,
       capabilities,
     });
     registered += capabilities.topicManagers.length + capabilities.lookupServices.length;
