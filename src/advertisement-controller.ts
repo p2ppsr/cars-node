@@ -80,6 +80,17 @@ async function main() {
   );
   server.configurePort(port);
   server.configureNetwork(overlayNetwork);
+  if (overlayNetwork === 'main' && process.env.TAAL_API_KEY_MAIN) {
+    server.configureArcApiKey(process.env.TAAL_API_KEY_MAIN);
+  } else if (overlayNetwork === 'test' && process.env.TAAL_API_KEY_TEST) {
+    server.configureArcApiKey(process.env.TAAL_API_KEY_TEST);
+  } else if (overlayNetwork === 'ttn' && process.env.TTN_ARCADE_URL) {
+    server.configureArcade(process.env.TTN_ARCADE_URL, {
+      apiKey: process.env.TTN_ARCADE_API_KEY,
+      deploymentId: process.env.TTN_ARCADE_DEPLOYMENT_ID,
+      chaintracksApiPrefix: process.env.TTN_CHAINTRACKS_API_PREFIX,
+    });
+  }
   await server.configureKnex(required('ADVERTISEMENT_KNEX_URL'));
   await server.configureMongo(required('ADVERTISEMENT_MONGO_URL'));
   server.configureEnableGASPSync(true);
@@ -133,7 +144,10 @@ async function main() {
   process.once('SIGTERM', () => void stop('SIGTERM'));
   process.once('SIGINT', () => void stop('SIGINT'));
 
-  let nextGaspAt = 0;
+  // The shared Mongo discovery state is already warm. Delay the first SQL/BEEF
+  // hydration pass until the regular maintenance window instead of imposing a
+  // full-network GASP import on every rollout.
+  let nextGaspAt = Date.now() + gaspIntervalMs;
   while (!stopping) {
     try {
       if (await leader.acquire()) {
