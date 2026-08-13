@@ -212,10 +212,6 @@ async function main() {
         'Retaining legacy key while revocation transactions await confirmation');
       continue;
     }
-    const funded = await ensureRevocationBalance(project.private_key, network);
-    if (funded) {
-      logger.info({ projectId: project.project_uuid, network, funded }, 'Funded legacy advertisement revocation');
-    }
     const advertisementBatches = new Map<string, Advertisement[]>();
     for (const advertisement of advertisements) {
       const batchKey = `${advertisement.protocol}\u0000${advertisement.domain}`;
@@ -226,6 +222,11 @@ async function main() {
     for (const protocolAdvertisements of advertisementBatches.values()) {
       for (let offset = 0; offset < protocolAdvertisements.length; offset += 20) {
         const batch = protocolAdvertisements.slice(offset, offset + 20);
+        const funded = await ensureRevocationBalance(project.private_key, network);
+        if (funded) {
+          logger.info({ projectId: project.project_uuid, network, funded },
+            'Funded legacy advertisement revocation batch');
+        }
         const advertiser = new WalletAdvertiser(
           chain,
           project.private_key,
