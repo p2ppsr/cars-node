@@ -36,12 +36,18 @@ test('generated project backends are thin advertisement consumers', () => {
   assert.equal(packageJson.dependencies['@bsv/sdk'], '2.4.0')
 })
 
-test('legacy preload disables local discovery services and advertisement writes', () => {
-  const { generateSafeAccessLoggerCjs } = require('../dist/src/utils.js')
-  const preload = generateSafeAccessLoggerCjs()
+test('legacy ESM preload disables local discovery services and advertisement writes', () => {
+  const {
+    generateCentralizedAdvertisementsPreloadMjs,
+    generateSafeAccessLoggerCjs
+  } = require('../dist/src/utils.js')
+  const preload = generateCentralizedAdvertisementsPreloadMjs()
+  const requestLogger = generateSafeAccessLoggerCjs()
 
   assert.match(preload, /CARS_CENTRALIZED_ADVERTISEMENTS/)
   assert.match(preload, /originalConfigureEngine\.call\(this, false\)/)
   assert.match(preload, /Engine\.prototype\.syncAdvertisements/)
   assert.match(preload, /crypto\.randomBytes\(32\)/)
+  assert.match(preload, /import OverlayExpress from '@bsv\/overlay-express'/)
+  assert.doesNotMatch(requestLogger, /CARS_CENTRALIZED_ADVERTISEMENTS/)
 })

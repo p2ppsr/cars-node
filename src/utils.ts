@@ -297,52 +297,6 @@ exec "$@"`
 export function generateSafeAccessLoggerCjs() {
   return `'use strict';
 
-if (process.env.CARS_CENTRALIZED_ADVERTISEMENTS === 'true') {
-  const { createRequire } = require('module');
-  const appRequire = createRequire('/app/index.ts');
-  const crypto = require('crypto');
-  const overlayExpressModule = appRequire('@bsv/overlay-express');
-  const OverlayExpress = overlayExpressModule.default || overlayExpressModule;
-  const { Engine } = appRequire('@bsv/overlay');
-  const { PushDrop, Utils } = appRequire('@bsv/sdk');
-
-  // OverlayExpress requires a server authentication key even when it is not an
-  // advertiser. Keep it process-local and never place it in Kubernetes state.
-  process.env.SERVER_PRIVATE_KEY = crypto.randomBytes(32).toString('hex');
-
-  if (!OverlayExpress.prototype.__carsCentralizedAdvertisementsPatched) {
-    OverlayExpress.prototype.__carsCentralizedAdvertisementsPatched = true;
-    const originalConfigureEngine = OverlayExpress.prototype.configureEngine;
-    OverlayExpress.prototype.configureEngine = function carsConfigureThinEngine() {
-      const passiveAdvertiser = {
-        createAdvertisements: async () => { throw new Error('Advertisements are managed by the CARS node'); },
-        findAllAdvertisements: async () => [],
-        revokeAdvertisements: async () => { throw new Error('Advertisements are managed by the CARS node'); },
-        parseAdvertisement: (outputScript) => {
-          const decoded = PushDrop.decode(outputScript);
-          const protocol = Utils.toUTF8(decoded.fields[0]);
-          if (decoded.fields.length < 4 || (protocol !== 'SHIP' && protocol !== 'SLAP')) {
-            throw new Error('Invalid SHIP/SLAP advertisement');
-          }
-          return {
-            protocol,
-            identityKey: Utils.toHex(decoded.fields[1]),
-            domain: Utils.toUTF8(decoded.fields[2]),
-            topicOrService: Utils.toUTF8(decoded.fields[3])
-          };
-        }
-      };
-      this.configureEngineParams({ advertiser: passiveAdvertiser });
-      return originalConfigureEngine.call(this, false);
-    };
-  }
-
-  if (!Engine.prototype.__carsCentralizedAdvertisementsPatched) {
-    Engine.prototype.__carsCentralizedAdvertisementsPatched = true;
-    Engine.prototype.syncAdvertisements = async function carsNodeOwnsAdvertisements() {};
-  }
-}
-
 if (process.env.SAFE_REQUEST_LOGGING === 'true') {
   const { createRequire } = require('module');
   const appRequire = createRequire('/app/index.ts');
@@ -654,6 +608,58 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
     };
 
     console.log('CARS_SAFE_ACCESS instrumentation installed');
+  }
+}
+`;
+}
+
+/**
+ * ESM preload used only to migrate already-built project images. Their entry
+ * points import Overlay Express as ESM through tsx, so patch the same module
+ * instance with Node's --import hook instead of requiring it from the CJS
+ * request-logging preload.
+ */
+export function generateCentralizedAdvertisementsPreloadMjs() {
+  return `import crypto from 'node:crypto';
+import OverlayExpress from '@bsv/overlay-express';
+import { Engine } from '@bsv/overlay';
+import { PushDrop, Utils } from '@bsv/sdk';
+
+if (process.env.CARS_CENTRALIZED_ADVERTISEMENTS === 'true') {
+  // OverlayExpress requires a server authentication key even when it is not an
+  // advertiser. Keep it process-local and never place it in Kubernetes state.
+  process.env.SERVER_PRIVATE_KEY = crypto.randomBytes(32).toString('hex');
+
+  if (!OverlayExpress.prototype.__carsCentralizedAdvertisementsPatched) {
+    OverlayExpress.prototype.__carsCentralizedAdvertisementsPatched = true;
+    const originalConfigureEngine = OverlayExpress.prototype.configureEngine;
+    OverlayExpress.prototype.configureEngine = function carsConfigureThinEngine() {
+      const passiveAdvertiser = {
+        createAdvertisements: async () => { throw new Error('Advertisements are managed by the CARS node'); },
+        findAllAdvertisements: async () => [],
+        revokeAdvertisements: async () => { throw new Error('Advertisements are managed by the CARS node'); },
+        parseAdvertisement: (outputScript) => {
+          const decoded = PushDrop.decode(outputScript);
+          const protocol = Utils.toUTF8(decoded.fields[0]);
+          if (decoded.fields.length < 4 || (protocol !== 'SHIP' && protocol !== 'SLAP')) {
+            throw new Error('Invalid SHIP/SLAP advertisement');
+          }
+          return {
+            protocol,
+            identityKey: Utils.toHex(decoded.fields[1]),
+            domain: Utils.toUTF8(decoded.fields[2]),
+            topicOrService: Utils.toUTF8(decoded.fields[3])
+          };
+        }
+      };
+      this.configureEngineParams({ advertiser: passiveAdvertiser });
+      return originalConfigureEngine.call(this, false);
+    };
+  }
+
+  if (!Engine.prototype.__carsCentralizedAdvertisementsPatched) {
+    Engine.prototype.__carsCentralizedAdvertisementsPatched = true;
+    Engine.prototype.syncAdvertisements = async function carsNodeOwnsAdvertisements() {};
   }
 }
 `;
