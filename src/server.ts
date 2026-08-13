@@ -15,6 +15,7 @@ import { makeWallet } from './utils/wallet';
 import { collectSystemHealth } from './health';
 import { KnexSessionManager } from '@bsv/wallet-toolbox';
 import type { ProjectWallets } from './utils/wallet';
+import { disableRequestTimeout } from './http-server';
 
 const port = parseInt(process.env.CARS_NODE_PORT || '7777', 10);
 const uploadTimeout = process.env.CARS_UPLOAD_TIMEOUT || '6h';
@@ -276,9 +277,10 @@ async function main() {
 
     app.use('/api/v1', routes);
 
-    app.listen(port, () => {
+    const server = app.listen(port, () => {
         logger.info(`CARS Node listening on port ${port}`);
     });
+    disableRequestTimeout(server);
 }
 
 main().catch(err => {
