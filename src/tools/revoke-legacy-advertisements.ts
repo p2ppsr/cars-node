@@ -198,20 +198,21 @@ async function main() {
     if (funded) {
       logger.info({ projectId: project.project_uuid, network, funded }, 'Funded legacy advertisement revocation');
     }
-    const advertisementsByDomain = new Map<string, Advertisement[]>();
+    const advertisementBatches = new Map<string, Advertisement[]>();
     for (const advertisement of advertisements) {
-      const domainAdvertisements = advertisementsByDomain.get(advertisement.domain) || [];
-      domainAdvertisements.push(advertisement);
-      advertisementsByDomain.set(advertisement.domain, domainAdvertisements);
+      const batchKey = `${advertisement.protocol}\u0000${advertisement.domain}`;
+      const batch = advertisementBatches.get(batchKey) || [];
+      batch.push(advertisement);
+      advertisementBatches.set(batchKey, batch);
     }
-    for (const [domain, domainAdvertisements] of advertisementsByDomain) {
-      for (let offset = 0; offset < domainAdvertisements.length; offset += 20) {
-        const batch = domainAdvertisements.slice(offset, offset + 20);
+    for (const protocolAdvertisements of advertisementBatches.values()) {
+      for (let offset = 0; offset < protocolAdvertisements.length; offset += 20) {
+        const batch = protocolAdvertisements.slice(offset, offset + 20);
         const advertiser = new WalletAdvertiser(
           chain,
           project.private_key,
           storageUrlForChain(chain),
-          domain,
+          batch[0].domain,
         );
         await advertiser.init();
         await submit(await advertiser.revokeAdvertisements(batch));
