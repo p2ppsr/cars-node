@@ -11,7 +11,10 @@ interface KubernetesDeployment {
 
 async function main() {
   await db.migrate.latest();
-  const raw = execFileSync('kubectl', ['get', 'deployments', '-A', '-o', 'json'], { encoding: 'utf8' });
+  const raw = execFileSync('kubectl', ['get', 'deployments', '-A', '-o', 'json'], {
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+  });
   const deployments = (JSON.parse(raw).items || []) as KubernetesDeployment[];
   const backendNamespaces = deployments
     .filter(item => item.metadata?.namespace?.startsWith('cars-project-'))
