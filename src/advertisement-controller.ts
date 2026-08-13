@@ -17,8 +17,9 @@ class MySqlLeaderLease {
   async acquire(): Promise<boolean> {
     if (this.connection) return this.isLeader;
     const connection = await this.knex.client.acquireConnection();
+    const queryConnection = typeof connection.promise === 'function' ? connection.promise() : connection;
     try {
-      const [rows] = await connection.query('SELECT GET_LOCK(?, 0) AS acquired', [this.lockName]);
+      const [rows] = await queryConnection.query('SELECT GET_LOCK(?, 0) AS acquired', [this.lockName]);
       this.isLeader = Number(rows?.[0]?.acquired) === 1;
       if (!this.isLeader) {
         await this.knex.client.releaseConnection(connection);
@@ -35,7 +36,10 @@ class MySqlLeaderLease {
   async release(): Promise<void> {
     if (!this.connection) return;
     try {
-      await this.connection.query('SELECT RELEASE_LOCK(?)', [this.lockName]);
+      const queryConnection = typeof this.connection.promise === 'function'
+        ? this.connection.promise()
+        : this.connection;
+      await queryConnection.query('SELECT RELEASE_LOCK(?)', [this.lockName]);
     } finally {
       await this.knex.client.releaseConnection(this.connection);
       this.connection = undefined;
@@ -158,5 +162,8 @@ async function main() {
 
 main().catch(error => {
   logger.fatal({ error }, 'CARS advertisement controller failed to start');
-  process.exitCode = 1;
+  // A second replica can briefly collide with Overlay Engine's migration lock.
+  // Exit so Kubernetes retries it after the elected starter has released the
+  // lock instead of leaving a permanently unready process with open DB clients.
+  process.exit(1);
 });
