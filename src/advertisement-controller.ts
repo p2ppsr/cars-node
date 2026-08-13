@@ -66,7 +66,10 @@ async function main() {
   await db.migrate.latest();
 
   const server = new OverlayExpress(
-    'CARS Advertisement Controller',
+    // OverlayExpress derives the discovery Mongo namespace from the service
+    // name. Use the established CARS namespace so the singleton controller
+    // owns the same CARS_lookup_services state as the project fleet did.
+    'CARS',
     privateKey,
     process.env.ADVERTISEMENT_CONTROLLER_FQDN || 'cars-advertisements.cars-operator-system.svc.cluster.local',
     process.env.ADVERTISEMENT_ADMIN_BEARER_TOKEN,
