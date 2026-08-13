@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { KeyDeriver, PrivateKey, Transaction, type TaggedBEEF } from '@bsv/sdk';
+import { KeyDeriver, LookupResolver, PrivateKey, Transaction, type TaggedBEEF } from '@bsv/sdk';
 import type { Advertisement } from '@bsv/overlay';
 import { WalletAdvertiser } from '@bsv/overlay-discovery-services';
 import db from '../db';
@@ -25,6 +25,52 @@ async function lookupController(identityKey: string, protocol: 'SHIP' | 'SLAP'):
     advertisements.push({ ...advertisement, beef, outputIndex: output.outputIndex });
   }
   return advertisements;
+}
+
+async function lookupPublic(
+  identityKey: string,
+  network: ReturnType<typeof normalizeProjectNetwork>,
+): Promise<Advertisement[]> {
+  const chain = projectNetworkToWalletChain(network);
+  const networkPreset = chain === 'test' ? 'testnet' : chain === 'ttn' ? 'teratestnet' : 'mainnet';
+  const resolver = new LookupResolver({ networkPreset });
+  const advertisements: Advertisement[] = [];
+  for (const protocol of ['SHIP', 'SLAP'] as const) {
+    // Call LookupResolver directly because WalletAdvertiser intentionally
+    // converts tracker failures into empty results. Key retirement must fail
+    // closed when either public discovery query is unavailable.
+    const answer = await resolver.query({
+      service: protocol === 'SHIP' ? 'ls_ship' : 'ls_slap',
+      query: { identityKey },
+    });
+    if (answer.type !== 'output-list') {
+      throw new Error(`Unexpected ${protocol} lookup response type: ${answer.type}`);
+    }
+    for (const output of answer.outputs) {
+      const beef = output.beef;
+      const tx = Transaction.fromBEEF(beef);
+      const advertisement = parser.parseAdvertisement(tx.outputs[output.outputIndex].lockingScript);
+      if (advertisement.protocol !== protocol || advertisement.identityKey !== identityKey) {
+        throw new Error(`Public ${protocol} lookup returned an advertisement for a different identity`);
+      }
+      advertisements.push({ ...advertisement, beef, outputIndex: output.outputIndex });
+    }
+  }
+  return advertisements;
+}
+
+async function verifyPublicAbsence(
+  identityKey: string,
+  network: ReturnType<typeof normalizeProjectNetwork>,
+): Promise<void> {
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
+    const remaining = await lookupPublic(identityKey, network);
+    if (remaining.length === 0) return;
+    if (attempt === 12) {
+      throw new Error(`Legacy identity still has ${remaining.length} public advertisements`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 15_000));
+  }
 }
 
 async function submit(taggedBEEF: TaggedBEEF): Promise<void> {
@@ -72,14 +118,7 @@ async function main() {
       throw new Error(`Refusing legacy revocation: project ${project.project_uuid} uses the controller identity`);
     }
     const network = normalizeProjectNetwork(project.network);
-    // The controller's synchronized lookup state is authoritative for both
-    // enumeration and the post-revoke proof. Public tracker discovery can
-    // swallow lookup failures and return an empty list, which is not a safe
-    // basis for permanently clearing the legacy project key.
-    const advertisements = [
-      ...await lookupController(identityKey, 'SHIP'),
-      ...await lookupController(identityKey, 'SLAP'),
-    ];
+    const advertisements = await lookupPublic(identityKey, network);
     advertisementCount += advertisements.length;
     logger.info({ projectId: project.project_uuid, advertisements: advertisements.length }, execute ? 'Revoking legacy advertisements' : 'Legacy advertisement revoke preview');
     if (!execute || advertisements.length === 0) {
@@ -107,13 +146,7 @@ async function main() {
         await submit(await advertiser.revokeAdvertisements(batch));
       }
     }
-    const remaining = [
-      ...await lookupController(identityKey, 'SHIP'),
-      ...await lookupController(identityKey, 'SLAP'),
-    ];
-    if (remaining.length) {
-      throw new Error(`Legacy identity for ${project.project_uuid} still has ${remaining.length} advertisements`);
-    }
+    await verifyPublicAbsence(identityKey, network);
     await db('projects').where({ id: project.id }).update({ private_key: null });
   }
 
