@@ -27,20 +27,6 @@ async function lookupController(identityKey: string, protocol: 'SHIP' | 'SLAP'):
   return advertisements;
 }
 
-async function lookupPublic(
-  privateKey: string,
-  network: ReturnType<typeof normalizeProjectNetwork>,
-  domain: string,
-): Promise<Advertisement[]> {
-  const chain = projectNetworkToWalletChain(network);
-  const advertiser = new WalletAdvertiser(chain, privateKey, storageUrlForChain(chain), domain);
-  await advertiser.init();
-  return [
-    ...await advertiser.findAllAdvertisements('SHIP'),
-    ...await advertiser.findAllAdvertisements('SLAP'),
-  ];
-}
-
 async function submit(taggedBEEF: TaggedBEEF): Promise<void> {
   await axios.post(`${controllerUrl}/submit`, Buffer.from(taggedBEEF.beef), {
     timeout: 120_000,
@@ -82,9 +68,18 @@ async function main() {
   let advertisementCount = 0;
   for (const project of projects) {
     const identityKey = new KeyDeriver(new PrivateKey(project.private_key, 'hex')).identityKey;
+    if (identityKey === nodeIdentityKey) {
+      throw new Error(`Refusing legacy revocation: project ${project.project_uuid} uses the controller identity`);
+    }
     const network = normalizeProjectNetwork(project.network);
-    const projectDomain = `https://backend.${project.project_uuid}.${process.env.PROJECT_DEPLOYMENT_DNS_NAME}`;
-    const advertisements = await lookupPublic(project.private_key, network, projectDomain);
+    // The controller's synchronized lookup state is authoritative for both
+    // enumeration and the post-revoke proof. Public tracker discovery can
+    // swallow lookup failures and return an empty list, which is not a safe
+    // basis for permanently clearing the legacy project key.
+    const advertisements = [
+      ...await lookupController(identityKey, 'SHIP'),
+      ...await lookupController(identityKey, 'SLAP'),
+    ];
     advertisementCount += advertisements.length;
     logger.info({ projectId: project.project_uuid, advertisements: advertisements.length }, execute ? 'Revoking legacy advertisements' : 'Legacy advertisement revoke preview');
     if (!execute || advertisements.length === 0) {
@@ -93,16 +88,24 @@ async function main() {
     }
 
     const chain = projectNetworkToWalletChain(network);
-    for (let offset = 0; offset < advertisements.length; offset += 20) {
-      const batch = advertisements.slice(offset, offset + 20);
-      const advertiser = new WalletAdvertiser(
-        chain,
-        project.private_key,
-        storageUrlForChain(chain),
-        batch[0].domain,
-      );
-      await advertiser.init();
-      await submit(await advertiser.revokeAdvertisements(batch));
+    const advertisementsByDomain = new Map<string, Advertisement[]>();
+    for (const advertisement of advertisements) {
+      const domainAdvertisements = advertisementsByDomain.get(advertisement.domain) || [];
+      domainAdvertisements.push(advertisement);
+      advertisementsByDomain.set(advertisement.domain, domainAdvertisements);
+    }
+    for (const [domain, domainAdvertisements] of advertisementsByDomain) {
+      for (let offset = 0; offset < domainAdvertisements.length; offset += 20) {
+        const batch = domainAdvertisements.slice(offset, offset + 20);
+        const advertiser = new WalletAdvertiser(
+          chain,
+          project.private_key,
+          storageUrlForChain(chain),
+          domain,
+        );
+        await advertiser.init();
+        await submit(await advertiser.revokeAdvertisements(batch));
+      }
     }
     const remaining = [
       ...await lookupController(identityKey, 'SHIP'),
