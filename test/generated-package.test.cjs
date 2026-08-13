@@ -36,18 +36,21 @@ test('generated project backends are thin advertisement consumers', () => {
   assert.equal(packageJson.dependencies['@bsv/sdk'], '2.4.0')
 })
 
-test('legacy ESM preload disables local discovery services and advertisement writes', () => {
+test('legacy index shim disables local discovery services and advertisement writes', () => {
   const {
-    generateCentralizedAdvertisementsPreloadMjs,
+    generateCentralizedAdvertisementsIndexTs,
     generateSafeAccessLoggerCjs
   } = require('../dist/src/utils.js')
-  const preload = generateCentralizedAdvertisementsPreloadMjs()
+  const legacyIndex = `import OverlayExpress from '@bsv/overlay-express'\nconst main = async () => {\n  await server.configureEngine();\n  await server.start();\n}`
+  const thinIndex = generateCentralizedAdvertisementsIndexTs(legacyIndex)
   const requestLogger = generateSafeAccessLoggerCjs()
 
-  assert.match(preload, /CARS_CENTRALIZED_ADVERTISEMENTS/)
-  assert.match(preload, /originalConfigureEngine\.call\(this, false\)/)
-  assert.match(preload, /Engine\.prototype\.syncAdvertisements/)
-  assert.match(preload, /crypto\.randomBytes\(32\)/)
-  assert.match(preload, /import OverlayExpress from '@bsv\/overlay-express'/)
-  assert.doesNotMatch(requestLogger, /CARS_CENTRALIZED_ADVERTISEMENTS/)
+  assert.match(thinIndex, /server\.configureEngine\(false\)/)
+  assert.match(thinIndex, /server\.engine\.syncAdvertisements = async/)
+  assert.match(thinIndex, /advertiser: carsNodePassiveAdvertiser/)
+  assert.match(thinIndex, /CARSNodePushDrop/)
+  assert.match(requestLogger, /CARS_CENTRALIZED_ADVERTISEMENTS/)
+  assert.match(requestLogger, /randomBytes\(32\)/)
+  assert.doesNotMatch(requestLogger, /overlay-express/)
+  assert.equal(generateCentralizedAdvertisementsIndexTs(thinIndex), thinIndex)
 })
