@@ -37,6 +37,9 @@ default; `--execute` revokes old-key outputs and clears each retired key only
 after its identity has no remaining advertisements.
 
 Existing immutable backend images are migrated with the generated
-`safe-access-logger.cjs` preload and `CARS_CENTRALIZED_ADVERTISEMENTS=true`.
-The preload forces the same thin engine mode without rebuilding application
-images.
+`cars-centralized-advertisements.mjs` preload,
+`CARS_CENTRALIZED_ADVERTISEMENTS=true`, and Node's `--import` option. The ESM
+preload forces the same thin engine mode without rebuilding application images
+and patches the same Overlay Express module instance loaded by `tsx`. Keep the
+CommonJS `safe-access-logger.cjs` focused on request instrumentation; requiring
+the ESM application graph from that synchronous hook is not portable.
