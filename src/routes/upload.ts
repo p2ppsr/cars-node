@@ -899,7 +899,7 @@ metadata:
   labels:
     app: mysql
 spec:
-  crVersion: 1.18.0
+  crVersion: 1.20.0
   secretsName: mysql-secrets
   updateStrategy: SmartUpdate
   allowUnsafeConfigurations: false
@@ -907,7 +907,7 @@ spec:
     tls: true
   pxc:
     size: 3
-    image: percona/percona-xtradb-cluster:8.0.42-33.1
+    image: percona/percona-xtradb-cluster:8.0.45-36.1
     autoRecovery: true
     resources:
       requests:
@@ -952,7 +952,7 @@ spec:
             storage: {{ .Values.storage.mysqlSize | quote }}
   haproxy:
     enabled: true
-    image: percona/haproxy:2.8.15
+    image: percona/haproxy:2.8.18-1
     size: 2
     resources:
       requests:
