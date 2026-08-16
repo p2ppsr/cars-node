@@ -55,16 +55,6 @@ spec:
       maxUnavailable: 1
     affinity:
       advanced:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      - "server2"
-                      - "server3"
-                      - "box"
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             - topologyKey: kubernetes.io/hostname
@@ -87,23 +77,14 @@ spec:
     resources:
       requests:
         cpu: "250m"
-        memory: "512Mi"
+        memory: "1Gi"
       limits:
         cpu: "1"
-        memory: "1Gi"
+        memory: "2Gi"
     podDisruptionBudget:
       minAvailable: 1
     affinity:
       advanced:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      - "server2"
-                      - "server3"
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
