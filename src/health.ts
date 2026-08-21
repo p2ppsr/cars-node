@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFile, execSync } from 'child_process';
 import axios from 'axios';
 import type { Knex } from 'knex';
 import { getProjectDbMode, getSharedDbConfig } from './shared-db';
@@ -30,6 +30,39 @@ function releaseNameForProject(projectId: string) {
 
 function parseJsonCommand(command: string) {
     return JSON.parse(execSync(command, { encoding: 'utf8' }));
+}
+
+function kubernetesHealthTimeoutMs() {
+    const configured = Number(process.env.CARS_KUBERNETES_HEALTH_TIMEOUT_MS || 1000);
+    if (!Number.isFinite(configured)) {
+        return 1000;
+    }
+    return Math.max(100, Math.min(5000, Math.trunc(configured)));
+}
+
+async function getCarsNamespace() {
+    return await new Promise<any>((resolve, reject) => {
+        execFile(
+            'kubectl',
+            ['get', 'namespace', 'cars-operator-system', '-o', 'json'],
+            {
+                encoding: 'utf8',
+                timeout: kubernetesHealthTimeoutMs(),
+                maxBuffer: 1024 * 1024
+            },
+            (error, stdout) => {
+                if (error) {
+                    reject(error);
+                    return;
+                }
+                try {
+                    resolve(JSON.parse(stdout));
+                } catch (parseError) {
+                    reject(parseError);
+                }
+            }
+        );
+    });
 }
 
 async function runHealthCheck(definition: HealthCheckDefinition): Promise<HealthCheckResult> {
@@ -114,9 +147,9 @@ export async function collectSystemHealth(db: Knex, options: {
         }),
         runHealthCheck({
             name: 'kubernetes',
+            critical: false,
             handler: async () => {
-                const raw = execSync('kubectl get namespace cars-operator-system -o json', { encoding: 'utf8' });
-                const namespace = JSON.parse(raw);
+                const namespace = await getCarsNamespace();
                 return {
                     status: 'ok',
                     details: { phase: namespace.status?.phase || 'Unknown' }
