@@ -81,6 +81,16 @@ test('control-plane image and deploy path pin and verify the production supply c
   assert.match(workflow, /required: true/)
   assert.match(workflow, /git merge-base --is-ancestor/)
   assert.match(deployScript, /deployment\/cars --timeout=15m[\s\S]+deployment\/cars-advertisement-controller --timeout=15m/)
+  assert.match(deployScript, /rollout lost node diversity/)
+
+  const advertisementManifest = fs.readFileSync(
+    path.join(__dirname, '..', 'k8s', 'advertisement-controller.yaml'),
+    'utf8'
+  )
+  assert.match(advertisementManifest, /topologySpreadConstraints:/)
+  assert.match(advertisementManifest, /minDomains: 2/)
+  assert.match(advertisementManifest, /whenUnsatisfiable: DoNotSchedule/)
+  assert.match(advertisementManifest, /matchLabelKeys:\n\s+- pod-template-hash/)
 })
 
 test('legacy index shim disables local discovery services and advertisement writes', () => {

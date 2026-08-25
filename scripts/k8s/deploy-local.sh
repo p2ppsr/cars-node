@@ -44,6 +44,27 @@ printf '%s\n' "${rendered_advertisement_manifest}" | "${kubectl_cmd}" apply -f -
   --overwrite
 "${kubectl_cmd}" -n cars-operator-system rollout status deployment/cars-advertisement-controller --timeout=15m
 
+controller_nodes="$(
+  "${kubectl_cmd}" -n cars-operator-system get pods \
+    -l app.kubernetes.io/name=cars-advertisement-controller -o json | \
+    READY_IMAGE="${image}" node -e '
+      const fs = require("fs")
+      const readyImage = process.env.READY_IMAGE
+      const pods = JSON.parse(fs.readFileSync(0, "utf8")).items
+      const nodes = new Set(pods
+        .filter(pod => !pod.metadata.deletionTimestamp)
+        .filter(pod => pod.spec.containers?.[0]?.image === readyImage)
+        .filter(pod => pod.status.containerStatuses?.[0]?.ready === true)
+        .map(pod => pod.spec.nodeName))
+      process.stdout.write([...nodes].sort().join("\n"))
+    '
+)"
+controller_node_count="$(awk 'NF {count++} END {print count+0}' <<<"${controller_nodes}")"
+[[ "${controller_node_count}" -ge 2 ]] || {
+  echo "CARS advertisement-controller rollout lost node diversity: ${controller_nodes:-none}" >&2
+  exit 1
+}
+
 curl --fail --show-error --silent https://cars.babbage.systems/health/live >/dev/null
 curl --fail --show-error --silent https://cars.babbage.systems/health/ready >/dev/null
 "${kubectl_cmd}" -n cars-operator-system get --raw "/api/v1/namespaces/cars-operator-system/services/http:cars-advertisement-controller:8081/proxy/health/ready" >/dev/null
