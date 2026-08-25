@@ -18,6 +18,18 @@ stringData:
   operator: "CHANGE_ME_SHARED_MYSQL_OPERATOR"
   replication: "CHANGE_ME_SHARED_MYSQL_REPLICATION"
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shared-mysql-env-vars-haproxy
+  namespace: cars-operator-system
+type: Opaque
+stringData:
+  # Keep two-failure resistance while reducing the default 20-second backend
+  # withdrawal window to two seconds. This is non-secret operator policy.
+  HA_SERVER_OPTIONS: "resolvers kubernetes check inter 1000 rise 1 fall 2 weight 1 on-marked-down shutdown-sessions"
+  HA_CONNECTION_TIMEOUT: "2"
+---
 apiVersion: pxc.percona.com/v1
 kind: PerconaXtraDBCluster
 metadata:
@@ -73,6 +85,7 @@ spec:
   haproxy:
     enabled: true
     image: percona/haproxy:2.8.18-1
+    envVarsSecret: shared-mysql-env-vars-haproxy
     size: 2
     resources:
       requests:

@@ -54,3 +54,15 @@ test('legacy index shim disables local discovery services and advertisement writ
   assert.doesNotMatch(requestLogger, /overlay-express/)
   assert.equal(generateCentralizedAdvertisementsIndexTs(thinIndex), thinIndex)
 })
+
+test('shared MySQL pins the proven HAProxy backend failover policy', () => {
+  const manifest = fs.readFileSync(
+    path.join(__dirname, '..', 'k8s', 'shared-databases.yaml'),
+    'utf8'
+  )
+
+  assert.match(manifest, /name: shared-mysql-env-vars-haproxy/)
+  assert.match(manifest, /envVarsSecret: shared-mysql-env-vars-haproxy/)
+  assert.match(manifest, /HA_SERVER_OPTIONS: "resolvers kubernetes check inter 1000 rise 1 fall 2 weight 1 on-marked-down shutdown-sessions"/)
+  assert.match(manifest, /HA_CONNECTION_TIMEOUT: "2"/)
+})
