@@ -1,4 +1,5 @@
 import Knex from 'knex';
+import { join } from 'node:path';
 
 const knexConfig = {
     client: 'mysql2',
@@ -9,7 +10,7 @@ const knexConfig = {
         database: 'cars_db'
     },
     migrations: {
-        directory: './src/migrations'
+        directory: join(__dirname, 'migrations')
     }
 };
 
