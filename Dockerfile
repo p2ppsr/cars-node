@@ -58,13 +58,6 @@ RUN npm run build && \
 
 FROM ${BUILDAH_IMAGE} AS runtime
 
-ARG APP_COMMIT=unknown
-ARG APP_VERSION=unknown
-
-LABEL org.opencontainers.image.source="https://github.com/p2ppsr/cars-node" \
-      org.opencontainers.image.revision="${APP_COMMIT}" \
-      org.opencontainers.image.version="${APP_VERSION}"
-
 RUN dnf upgrade -y --refresh && \
     dnf install -y bash ca-certificates openssl shadow-utils && \
     dnf clean all && \
@@ -87,6 +80,13 @@ RUN chmod 0755 /wait-for-services.sh && \
     test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11" && \
     test "$(helm version --template '{{.Version}}')" = "v4.2.4" && \
     buildah --version | grep -F 'buildah version 1.43.2'
+
+ARG APP_COMMIT=unknown
+ARG APP_VERSION=unknown
+
+LABEL org.opencontainers.image.source="https://github.com/p2ppsr/cars-node" \
+      org.opencontainers.image.revision="${APP_COMMIT}" \
+      org.opencontainers.image.version="${APP_VERSION}"
 
 EXPOSE 7777
 
