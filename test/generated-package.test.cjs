@@ -36,6 +36,37 @@ test('generated project backends are thin advertisement consumers', () => {
   assert.equal(packageJson.dependencies['@bsv/sdk'], '2.4.0')
 })
 
+test('control-plane image and deploy path pin and verify the production supply chain', () => {
+  const dockerfile = fs.readFileSync(
+    path.join(__dirname, '..', 'Dockerfile'),
+    'utf8'
+  )
+  const workflow = fs.readFileSync(
+    path.join(__dirname, '..', '.github', 'workflows', 'deploy-production-local.yml'),
+    'utf8'
+  )
+  const deployScript = fs.readFileSync(
+    path.join(__dirname, '..', 'scripts', 'k8s', 'deploy-local.sh'),
+    'utf8'
+  )
+
+  assert.match(dockerfile, /buildah\/stable:v1\.43\.2@sha256:[0-9a-f]{64}/)
+  assert.match(dockerfile, /ARG NODE_VERSION=24\.19\.0/)
+  assert.match(dockerfile, /ARG KUBECTL_VERSION=1\.34\.9/)
+  assert.match(dockerfile, /ARG HELM_VERSION=3\.21\.4/)
+  assert.equal((dockerfile.match(/sha256sum --check --strict/g) || []).length, 3)
+  assert.match(dockerfile, /FROM \$\{BUILDAH_IMAGE\} AS tools/)
+  assert.match(dockerfile, /FROM \$\{BUILDAH_IMAGE\} AS build/)
+  assert.match(dockerfile, /FROM \$\{BUILDAH_IMAGE\} AS runtime/)
+  assert.match(dockerfile, /npm prune --omit=dev/)
+  assert.doesNotMatch(dockerfile, /setup_lts|get-helm-3|VERIFY_CHECKSUM=false|:latest/)
+
+  assert.doesNotMatch(workflow, /\n  push:/)
+  assert.match(workflow, /required: true/)
+  assert.match(workflow, /git merge-base --is-ancestor/)
+  assert.match(deployScript, /deployment\/cars --timeout=15m[\s\S]+deployment\/cars-advertisement-controller --timeout=15m/)
+})
+
 test('legacy index shim disables local discovery services and advertisement writes', () => {
   const {
     generateCentralizedAdvertisementsIndexTs,
