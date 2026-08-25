@@ -140,6 +140,12 @@ test('control-plane image and deploy path pin and verify the production supply c
   assert.match(workflow, /git merge-base --is-ancestor/)
   assert.match(deployScript, /deployment\/cars --timeout=15m[\s\S]+deployment\/cars-advertisement-controller --timeout=15m/)
   assert.match(deployScript, /rollout lost node diversity/)
+  assert.match(deployScript, /metadata\.deletionTimestamp.*spec\.containers\[0\]\.image.*status\.containerStatuses\[0\]\.ready/)
+  assert.doesNotMatch(deployScript, /node -[ep]/)
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(__dirname, '..', 'scripts', 'k8s', 'build-local-image.sh'), 'utf8'),
+    /node -[ep]/
+  )
 
   const advertisementManifest = fs.readFileSync(
     path.join(__dirname, '..', 'k8s', 'advertisement-controller.yaml'),

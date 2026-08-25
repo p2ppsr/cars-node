@@ -11,7 +11,11 @@ source_sha="${SOURCE_SHA:-$(git rev-parse HEAD)}"
 }
 short_sha="${source_sha:0:12}"
 image_date="${IMAGE_DATE:-$(date -u +%F)}"
-package_version="$(node -p "require('./package.json').version")"
+package_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -n 1)"
+[[ "$package_version" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]] || {
+  echo "cannot read a safe package version from package.json" >&2
+  exit 2
+}
 image_tag="${IMAGE_TAG:-v${package_version}-${image_date}-cars-reliability-${short_sha}}"
 registry_push="${REGISTRY_PUSH:-10.152.183.28:5000}"
 registry_pull="${REGISTRY_PULL:-registry.cars-operator-system.svc.cluster.local:5000}"

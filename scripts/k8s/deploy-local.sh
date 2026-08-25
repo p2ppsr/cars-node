@@ -6,7 +6,11 @@ if [[ -z "${IMAGE_TAG:-}" ]]; then
     echo "IMAGE_TAG or SOURCE_SHA is required" >&2
     exit 2
   fi
-  package_version="$(node -p "require('./package.json').version")"
+  package_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -n 1)"
+  [[ "$package_version" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]] || {
+    echo "cannot read a safe package version from package.json" >&2
+    exit 2
+  }
   IMAGE_TAG="v${package_version}-$(date -u +%F)-cars-reliability-${SOURCE_SHA:0:12}"
 fi
 
@@ -44,20 +48,15 @@ printf '%s\n' "${rendered_advertisement_manifest}" | "${kubectl_cmd}" apply -f -
   --overwrite
 "${kubectl_cmd}" -n cars-operator-system rollout status deployment/cars-advertisement-controller --timeout=15m
 
-controller_nodes="$(
+controller_inventory="$(
   "${kubectl_cmd}" -n cars-operator-system get pods \
-    -l app.kubernetes.io/name=cars-advertisement-controller -o json | \
-    READY_IMAGE="${image}" node -e '
-      const fs = require("fs")
-      const readyImage = process.env.READY_IMAGE
-      const pods = JSON.parse(fs.readFileSync(0, "utf8")).items
-      const nodes = new Set(pods
-        .filter(pod => !pod.metadata.deletionTimestamp)
-        .filter(pod => pod.spec.containers?.[0]?.image === readyImage)
-        .filter(pod => pod.status.containerStatuses?.[0]?.ready === true)
-        .map(pod => pod.spec.nodeName))
-      process.stdout.write([...nodes].sort().join("\n"))
-    '
+    -l app.kubernetes.io/name=cars-advertisement-controller \
+    -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{"\t"}{.spec.containers[0].image}{"\t"}{.status.containerStatuses[0].ready}{"\t"}{.spec.nodeName}{"\n"}{end}'
+)"
+controller_nodes="$(
+  awk -F '\t' -v ready_image="${image}" \
+    '$1 == "" && $2 == ready_image && $3 == "true" && $4 != "" {print $4}' \
+    <<<"${controller_inventory}" | sort -u
 )"
 controller_node_count="$(awk 'NF {count++} END {print count+0}' <<<"${controller_nodes}")"
 [[ "${controller_node_count}" -ge 2 ]] || {
