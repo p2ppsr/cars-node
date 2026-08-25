@@ -65,4 +65,16 @@ test('shared MySQL pins the proven HAProxy backend failover policy', () => {
   assert.match(manifest, /envVarsSecret: shared-mysql-env-vars-haproxy/)
   assert.match(manifest, /HA_SERVER_OPTIONS: "resolvers kubernetes check inter 1000 rise 1 fall 2 weight 1 on-marked-down shutdown-sessions"/)
   assert.match(manifest, /HA_CONNECTION_TIMEOUT: "2"/)
+  assert.match(
+    manifest,
+    /percona\/percona-xtradb-cluster:8\.4\.10-10\.1@sha256:c4c9f39ce0b4cff7bccc2c138c08ed60e78deb8539d0e1e3a51fbb2ce3db7875/
+  )
+  const uploadRoute = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'routes', 'upload.ts'),
+    'utf8'
+  )
+  assert.match(
+    uploadRoute,
+    /percona\/percona-xtradb-cluster:8\.4\.10-10\.1@sha256:c4c9f39ce0b4cff7bccc2c138c08ed60e78deb8539d0e1e3a51fbb2ce3db7875/
+  )
 })
