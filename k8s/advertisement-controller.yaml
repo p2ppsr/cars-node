@@ -39,6 +39,16 @@ spec:
                 labelSelector:
                   matchLabels:
                     app.kubernetes.io/name: cars-advertisement-controller
+      topologySpreadConstraints:
+        - maxSkew: 1
+          minDomains: 2
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: cars-advertisement-controller
+          matchLabelKeys:
+            - pod-template-hash
       containers:
         - name: controller
           image: registry.cars-operator-system.svc.cluster.local:5000/cars-node:latest
