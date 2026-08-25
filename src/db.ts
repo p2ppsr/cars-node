@@ -10,7 +10,7 @@ const knexConfig = {
         database: 'cars_db'
     },
     migrations: {
-        directory: join(__dirname, 'migrations')
+        directory: process.env.CARS_MIGRATIONS_DIR || join(__dirname, 'migrations')
     }
 };
 
