@@ -42,7 +42,7 @@ test('database migrations resolve beside the executing source or compiled module
     'utf8'
   )
 
-  assert.match(dbSource, /directory: join\(__dirname, 'migrations'\)/)
+  assert.match(dbSource, /process\.env\.CARS_MIGRATIONS_DIR \|\| join\(__dirname, 'migrations'\)/)
   assert.doesNotMatch(dbSource, /directory: '\.\/src\/migrations'/)
 })
 
@@ -71,6 +71,8 @@ test('control-plane image and deploy path pin and verify the production supply c
   assert.match(dockerfile, /npm prune --omit=dev/)
   assert.match(dockerfile, /COPY --from=tools \/usr\/local\/bin\/node \/usr\/local\/bin\/node/)
   assert.match(dockerfile, /test ! -e \/usr\/local\/bin\/npm/)
+  assert.match(dockerfile, /ENV CARS_MIGRATIONS_DIR=\/app\/src\/migrations/)
+  assert.match(dockerfile, /\/app\/src\/migrations\/\$\(basename "\$\{file%\.js\}"\)\.ts/)
   assert.match(dockerfile, /AS build[\s\S]+dnf install -y gcc-c\+\+ make[\s\S]+COPY --from=tools \/usr\/local\/ \/usr\/local\//)
   assert.match(dockerfile, /AS runtime[\s\S]+dnf install -y bash ca-certificates openssl shadow-utils[\s\S]+ARG APP_COMMIT/)
   assert.doesNotMatch(dockerfile, /setup_lts|get-helm-3|VERIFY_CHECKSUM=false|:latest/)

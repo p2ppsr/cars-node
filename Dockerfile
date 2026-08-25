@@ -73,13 +73,21 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
 COPY wait-for-services.sh /wait-for-services.sh
 
-RUN chmod 0755 /wait-for-services.sh && \
+RUN install -d -m 0755 /app/src/migrations && \
+    for file in /app/dist/src/migrations/*.js; do \
+      install -m 0644 "$file" "/app/src/migrations/$(basename "${file%.js}").ts"; \
+    done && \
+    test "$(find /app/src/migrations -maxdepth 1 -type f -name '*.ts' | wc -l)" = \
+      "$(find /app/dist/src/migrations -maxdepth 1 -type f -name '*.js' | wc -l)" && \
+    chmod 0755 /wait-for-services.sh && \
     test ! -e /usr/local/bin/npm && \
     test ! -d /usr/local/lib/node_modules/npm && \
     test "$(node --version)" = "v24.19.0" && \
     test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11" && \
     test "$(helm version --template '{{.Version}}')" = "v4.2.4" && \
     buildah --version | grep -F 'buildah version 1.43.2'
+
+ENV CARS_MIGRATIONS_DIR=/app/src/migrations
 
 ARG APP_COMMIT=unknown
 ARG APP_VERSION=unknown
