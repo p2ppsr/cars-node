@@ -61,6 +61,7 @@ test('control-plane image and deploy path pin and verify the production supply c
   assert.match(dockerfile, /npm prune --omit=dev/)
   assert.match(dockerfile, /COPY --from=tools \/usr\/local\/bin\/node \/usr\/local\/bin\/node/)
   assert.match(dockerfile, /test ! -e \/usr\/local\/bin\/npm/)
+  assert.match(dockerfile, /AS build[\s\S]+dnf install -y gcc-c\+\+ make[\s\S]+COPY --from=tools \/usr\/local\/ \/usr\/local\//)
   assert.doesNotMatch(dockerfile, /setup_lts|get-helm-3|VERIFY_CHECKSUM=false|:latest/)
 
   assert.doesNotMatch(workflow, /\n  push:/)

@@ -2,13 +2,6 @@ ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.2@sha256:6671da220c2a55976b4f10f6
 
 FROM ${BUILDAH_IMAGE} AS tools
 
-ARG NODE_VERSION=24.19.0
-ARG NODE_SHA256=14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647
-ARG KUBECTL_VERSION=1.34.11
-ARG KUBECTL_SHA256=8efbb9435132a190920eb65a47a8c1ecf755ad85ab57a600c9bedbab460bb7a8
-ARG HELM_VERSION=4.2.4
-ARG HELM_SHA256=c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3
-
 RUN dnf upgrade -y --refresh && \
     dnf install -y ca-certificates curl gzip tar xz && \
     dnf clean all && \
@@ -16,6 +9,8 @@ RUN dnf upgrade -y --refresh && \
 
 WORKDIR /tmp/toolchain
 
+ARG NODE_VERSION=24.19.0
+ARG NODE_SHA256=14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647
 RUN curl --fail --location --proto '=https' --tlsv1.2 \
       --output node.tar.xz \
       "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" && \
@@ -23,12 +18,16 @@ RUN curl --fail --location --proto '=https' --tlsv1.2 \
     tar --extract --xz --file node.tar.xz --strip-components=1 --directory /usr/local && \
     rm node.tar.xz
 
+ARG KUBECTL_VERSION=1.34.11
+ARG KUBECTL_SHA256=8efbb9435132a190920eb65a47a8c1ecf755ad85ab57a600c9bedbab460bb7a8
 RUN curl --fail --location --proto '=https' --tlsv1.2 \
       --output /usr/local/bin/kubectl \
       "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
     printf '%s  %s\n' "${KUBECTL_SHA256}" /usr/local/bin/kubectl | sha256sum --check --strict && \
     chmod 0755 /usr/local/bin/kubectl
 
+ARG HELM_VERSION=4.2.4
+ARG HELM_SHA256=c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3
 RUN curl --fail --location --proto '=https' --tlsv1.2 \
       --output helm.tar.gz \
       "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" && \
@@ -39,12 +38,12 @@ RUN curl --fail --location --proto '=https' --tlsv1.2 \
 
 FROM ${BUILDAH_IMAGE} AS build
 
-COPY --from=tools /usr/local/ /usr/local/
-
 RUN dnf upgrade -y --refresh && \
     dnf install -y gcc-c++ make && \
     dnf clean all && \
     rm -rf /var/cache/dnf
+
+COPY --from=tools /usr/local/ /usr/local/
 
 WORKDIR /app
 
