@@ -36,6 +36,16 @@ test('generated project backends are thin advertisement consumers', () => {
   assert.equal(packageJson.dependencies['@bsv/sdk'], '2.4.0')
 })
 
+test('database migrations resolve beside the executing source or compiled module', () => {
+  const dbSource = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'db.ts'),
+    'utf8'
+  )
+
+  assert.match(dbSource, /directory: join\(__dirname, 'migrations'\)/)
+  assert.doesNotMatch(dbSource, /directory: '\.\/src\/migrations'/)
+})
+
 test('control-plane image and deploy path pin and verify the production supply chain', () => {
   const dockerfile = fs.readFileSync(
     path.join(__dirname, '..', 'Dockerfile'),
