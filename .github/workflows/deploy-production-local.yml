@@ -1,14 +1,12 @@
 name: Deploy Production Local
 
 on:
-  push:
-    branches:
-      - master
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Source SHA to deploy
-        required: false
+        description: Exact merged master SHA to deploy
+        required: true
+        type: string
 
 concurrency:
   group: cars-node-prod-local
@@ -30,7 +28,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_sha || github.sha }}
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Verify approved master source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          git fetch --no-tags origin master
+          git merge-base --is-ancestor "${SOURCE_SHA}" origin/master
 
       - uses: actions/setup-node@v4
         with:
@@ -39,11 +46,11 @@ jobs:
       - name: Build and push image
         id: build
         env:
-          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
         run: scripts/k8s/build-local-image.sh
 
       - name: Deploy to local Kubernetes
         env:
-          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
           IMAGE_TAG: ${{ steps.build.outputs.image_tag }}
         run: scripts/k8s/deploy-local.sh

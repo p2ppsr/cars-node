@@ -5,6 +5,10 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "${repo_root}"
 
 source_sha="${SOURCE_SHA:-$(git rev-parse HEAD)}"
+[[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "SOURCE_SHA must be a full lowercase Git commit SHA" >&2
+  exit 2
+}
 short_sha="${source_sha:0:12}"
 image_date="${IMAGE_DATE:-$(date -u +%F)}"
 package_version="$(node -p "require('./package.json').version")"
@@ -16,6 +20,7 @@ push_image="${registry_push}/cars-node:${image_tag}"
 pull_image="${registry_pull}/cars-node:${image_tag}"
 
 docker build \
+  --platform linux/amd64 \
   --build-arg "APP_COMMIT=${source_sha}" \
   --build-arg "APP_VERSION=${package_version}" \
   -t "${push_image}" .

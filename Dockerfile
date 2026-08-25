@@ -1,37 +1,93 @@
-FROM quay.io/buildah/stable:latest
+ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.2@sha256:6671da220c2a55976b4f10f6edfe21da3fcba86a81d495ce1ecd5b1129a97063
 
-# Install Node.js and npm from NodeSource
-RUN dnf update -y && \
-    dnf install -y curl bash openssl shadow-utils gcc-c++ make && \
-    curl -fsSL https://rpm.nodesource.com/setup_lts.x | bash - && \
-    dnf install -y nodejs && \
-    dnf clean all
+FROM ${BUILDAH_IMAGE} AS tools
+
+RUN dnf upgrade -y --refresh && \
+    dnf install -y ca-certificates curl gzip tar xz && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+WORKDIR /tmp/toolchain
+
+ARG NODE_VERSION=24.19.0
+ARG NODE_SHA256=14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647
+RUN curl --fail --location --proto '=https' --tlsv1.2 \
+      --output node.tar.xz \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" && \
+    printf '%s  %s\n' "${NODE_SHA256}" node.tar.xz | sha256sum --check --strict && \
+    tar --extract --xz --file node.tar.xz --strip-components=1 --directory /usr/local && \
+    rm node.tar.xz
+
+ARG KUBECTL_VERSION=1.34.11
+ARG KUBECTL_SHA256=8efbb9435132a190920eb65a47a8c1ecf755ad85ab57a600c9bedbab460bb7a8
+RUN curl --fail --location --proto '=https' --tlsv1.2 \
+      --output /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
+    printf '%s  %s\n' "${KUBECTL_SHA256}" /usr/local/bin/kubectl | sha256sum --check --strict && \
+    chmod 0755 /usr/local/bin/kubectl
+
+ARG HELM_VERSION=4.2.4
+ARG HELM_SHA256=c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3
+RUN curl --fail --location --proto '=https' --tlsv1.2 \
+      --output helm.tar.gz \
+      "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" && \
+    printf '%s  %s\n' "${HELM_SHA256}" helm.tar.gz | sha256sum --check --strict && \
+    tar --extract --gzip --file helm.tar.gz && \
+    install -m 0755 linux-amd64/helm /usr/local/bin/helm && \
+    rm -rf helm.tar.gz linux-amd64
+
+FROM ${BUILDAH_IMAGE} AS build
+
+RUN dnf upgrade -y --refresh && \
+    dnf install -y gcc-c++ make && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+COPY --from=tools /usr/local/ /usr/local/
 
 WORKDIR /app
 
-# Install kubectl
-RUN curl -LO "https://dl.k8s.io/release/v1.25.0/bin/linux/amd64/kubectl" && \
-    chmod +x kubectl && \
-    mv kubectl /usr/local/bin/kubectl
-
-# Install helm
-RUN curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | VERIFY_CHECKSUM=false bash
-
-# Copy package metadata first for dependency installation
 COPY package.json package-lock.json tsconfig.json ./
-
-# Install dependencies and build the compiled runtime
 RUN npm ci
 
-# Copy the application source and build artifacts
 COPY src ./src
 COPY setup.ts ./setup.ts
+RUN npm run build && \
+    npm prune --omit=dev && \
+    npm cache clean --force
+
+FROM ${BUILDAH_IMAGE} AS runtime
+
+RUN dnf upgrade -y --refresh && \
+    dnf install -y bash ca-certificates openssl shadow-utils && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+COPY --from=tools /usr/local/bin/node /usr/local/bin/node
+COPY --from=tools /usr/local/bin/kubectl /usr/local/bin/kubectl
+COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
+
+WORKDIR /app
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/package.json ./package.json
 COPY wait-for-services.sh /wait-for-services.sh
 
-RUN npm run build
+RUN chmod 0755 /wait-for-services.sh && \
+    test ! -e /usr/local/bin/npm && \
+    test ! -d /usr/local/lib/node_modules/npm && \
+    test "$(node --version)" = "v24.19.0" && \
+    test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11" && \
+    test "$(helm version --template '{{.Version}}')" = "v4.2.4" && \
+    buildah --version | grep -F 'buildah version 1.43.2'
 
-RUN chmod +x /wait-for-services.sh
+ARG APP_COMMIT=unknown
+ARG APP_VERSION=unknown
+
+LABEL org.opencontainers.image.source="https://github.com/p2ppsr/cars-node" \
+      org.opencontainers.image.revision="${APP_COMMIT}" \
+      org.opencontainers.image.version="${APP_VERSION}"
 
 EXPOSE 7777
 
-CMD ["npm", "run", "start:prod"]
+CMD ["node", "dist/src/server.js"]
