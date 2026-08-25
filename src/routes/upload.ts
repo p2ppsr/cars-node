@@ -907,7 +907,7 @@ spec:
     tls: true
   pxc:
     size: 3
-    image: percona/percona-xtradb-cluster:8.0.45-36.1
+    image: percona/percona-xtradb-cluster:8.0.46-38.1@sha256:ca15bf7f3b53464a546b57a2a2a3e4cd67cedc6ad25c079e1461128465b649ff
     autoRecovery: true
     resources:
       requests:
