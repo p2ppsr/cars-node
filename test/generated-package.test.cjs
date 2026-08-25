@@ -52,8 +52,8 @@ test('control-plane image and deploy path pin and verify the production supply c
 
   assert.match(dockerfile, /buildah\/stable:v1\.43\.2@sha256:[0-9a-f]{64}/)
   assert.match(dockerfile, /ARG NODE_VERSION=24\.19\.0/)
-  assert.match(dockerfile, /ARG KUBECTL_VERSION=1\.34\.9/)
-  assert.match(dockerfile, /ARG HELM_VERSION=3\.21\.4/)
+  assert.match(dockerfile, /ARG KUBECTL_VERSION=1\.34\.11/)
+  assert.match(dockerfile, /ARG HELM_VERSION=4\.2\.4/)
   assert.equal((dockerfile.match(/sha256sum --check --strict/g) || []).length, 3)
   assert.match(dockerfile, /FROM \$\{BUILDAH_IMAGE\} AS tools/)
   assert.match(dockerfile, /FROM \$\{BUILDAH_IMAGE\} AS build/)
