@@ -36,6 +36,64 @@ test('generated project backends are thin advertisement consumers', () => {
   assert.equal(packageJson.dependencies['@bsv/sdk'], '2.4.0')
 })
 
+test('generated platform TLS renews independently from custom domains', () => {
+  const { buildProjectIngressTls } = require('../dist/src/ingress-tls.js')
+  const projectUuid = '9a52aaaabbbbccccddddeeeeffff0000'
+  const generated = buildProjectIngressTls({
+    projectUuid,
+    frontendEnabled: true,
+    backendEnabled: true,
+    frontendCustomDomain: 'frontend.example',
+    backendCustomDomain: 'backend.example'
+  })
+
+  assert.match(
+    generated,
+    new RegExp(`hosts:\\n      - \\{\\{ \\.Values\\.ingressHostFrontend \\}\\}\\n      - \\{\\{ \\.Values\\.ingressHostBackend \\}\\}\\n      secretName: project-${projectUuid}-tls`)
+  )
+  assert.match(
+    generated,
+    new RegExp(`hosts:\\n      - \\{\\{ \\.Values\\.ingressCustomFrontend \\}\\}\\n      secretName: project-${projectUuid}-frontend-custom-tls`)
+  )
+  assert.match(
+    generated,
+    new RegExp(`hosts:\\n      - \\{\\{ \\.Values\\.ingressCustomBackend \\}\\}\\n      secretName: project-${projectUuid}-backend-custom-tls`)
+  )
+})
+
+test('a shared frontend and backend custom domain uses one certificate', () => {
+  const { buildProjectIngressTls } = require('../dist/src/ingress-tls.js')
+  const projectUuid = '9a52aaaabbbbccccddddeeeeffff0000'
+  const generated = buildProjectIngressTls({
+    projectUuid,
+    frontendEnabled: true,
+    backendEnabled: true,
+    frontendCustomDomain: 'shared.example',
+    backendCustomDomain: 'shared.example'
+  })
+
+  assert.match(generated, new RegExp(`secretName: project-${projectUuid}-custom-tls`))
+  assert.equal((generated.match(/ingressCustom/g) || []).length, 1)
+  assert.doesNotMatch(generated, /frontend-custom-tls|backend-custom-tls/)
+})
+
+test('projects without custom domains retain the existing platform secret', () => {
+  const { buildProjectIngressTls } = require('../dist/src/ingress-tls.js')
+  const projectUuid = '9a52aaaabbbbccccddddeeeeffff0000'
+  const generated = buildProjectIngressTls({
+    projectUuid,
+    frontendEnabled: true,
+    backendEnabled: false
+  })
+
+  assert.match(generated, new RegExp(`secretName: project-${projectUuid}-tls`))
+  assert.doesNotMatch(generated, /custom-tls|ingressCustom/)
+  assert.throws(
+    () => buildProjectIngressTls({ projectUuid, frontendEnabled: false, backendEnabled: false }),
+    /at least one generated platform host/
+  )
+})
+
 test('database migrations resolve beside the executing source or compiled module', () => {
   const dbSource = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'db.ts'),

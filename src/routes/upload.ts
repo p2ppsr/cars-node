@@ -32,6 +32,7 @@ import {
   type ProjectNetwork,
 } from '../network';
 import { inspectProjectCapabilities, replaceProjectCapabilities } from '../advertisements/registry';
+import { buildProjectIngressTls } from '../ingress-tls';
 
 const projectsDomain: string = process.env.PROJECT_DEPLOYMENT_DNS_NAME!;
 
@@ -771,19 +772,13 @@ spec:
     //
     // 14d) Ingress for both frontend and backend
     //
-    let tlsHosts = '';
-    if (frontendEnabled) {
-      tlsHosts += `      - {{ .Values.ingressHostFrontend }}\n`;
-      if (valuesObj.ingressCustomFrontend) {
-        tlsHosts += `      - {{ .Values.ingressCustomFrontend }}\n`;
-      }
-    }
-    if (backendEnabled) {
-      tlsHosts += `      - {{ .Values.ingressHostBackend }}\n`;
-      if (valuesObj.ingressCustomBackend) {
-        tlsHosts += `      - {{ .Values.ingressCustomBackend }}\n`;
-      }
-    }
+    const ingressTls = buildProjectIngressTls({
+      projectUuid: project.project_uuid,
+      frontendEnabled,
+      backendEnabled,
+      frontendCustomDomain: valuesObj.ingressCustomFrontend,
+      backendCustomDomain: valuesObj.ingressCustomBackend,
+    });
 
     let ingressYaml = `apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -802,9 +797,7 @@ metadata:
 spec:
   ingressClassName: nginx
   tls:
-    - hosts:
-${tlsHosts}      secretName: project-${project.project_uuid}-tls
-  rules:
+${ingressTls}  rules:
 `;
 
     if (frontendEnabled) {
