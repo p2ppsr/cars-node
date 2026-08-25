@@ -59,6 +59,8 @@ test('control-plane image and deploy path pin and verify the production supply c
   assert.match(dockerfile, /FROM \$\{BUILDAH_IMAGE\} AS build/)
   assert.match(dockerfile, /FROM \$\{BUILDAH_IMAGE\} AS runtime/)
   assert.match(dockerfile, /npm prune --omit=dev/)
+  assert.match(dockerfile, /COPY --from=tools \/usr\/local\/bin\/node \/usr\/local\/bin\/node/)
+  assert.match(dockerfile, /test ! -e \/usr\/local\/bin\/npm/)
   assert.doesNotMatch(dockerfile, /setup_lts|get-helm-3|VERIFY_CHECKSUM=false|:latest/)
 
   assert.doesNotMatch(workflow, /\n  push:/)

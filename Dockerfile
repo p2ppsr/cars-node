@@ -71,7 +71,9 @@ RUN dnf upgrade -y --refresh && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
-COPY --from=tools /usr/local/ /usr/local/
+COPY --from=tools /usr/local/bin/node /usr/local/bin/node
+COPY --from=tools /usr/local/bin/kubectl /usr/local/bin/kubectl
+COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
 
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
@@ -80,6 +82,8 @@ COPY --from=build /app/package.json ./package.json
 COPY wait-for-services.sh /wait-for-services.sh
 
 RUN chmod 0755 /wait-for-services.sh && \
+    test ! -e /usr/local/bin/npm && \
+    test ! -d /usr/local/lib/node_modules/npm && \
     test "$(node --version)" = "v24.19.0" && \
     test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.9" && \
     test "$(helm version --template '{{.Version}}')" = "v3.21.4" && \
