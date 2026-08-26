@@ -312,7 +312,129 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
   const { createRequire } = require('module');
   const appRequire = createRequire('/app/index.ts');
   const crypto = require('crypto');
+  const dns = require('dns').promises;
+  const http = require('http');
+  const https = require('https');
+  const net = require('net');
   const express = appRequire('express');
+  const { PushDrop, Transaction, Utils } = appRequire('@bsv/sdk');
+  const normalizeDeniedDomain = (value) => {
+    let normalized = String(value || '').trim().toLowerCase();
+    while (normalized.endsWith('/')) normalized = normalized.slice(0, -1);
+    return normalized;
+  };
+  const deniedDiscoveryDomains = new Set(
+    String(process.env.CARS_BANNED_AD_DOMAINS || '')
+      .split(',')
+      .map(normalizeDeniedDomain)
+      .filter(Boolean)
+  );
+  const preferredDiscoveryIdentityKey = String(
+    process.env.CARS_DISCOVERY_PREFERRED_IDENTITY_KEY || ''
+  ).trim();
+
+  if (deniedDiscoveryDomains.size > 0) {
+    try {
+      const { Engine } = appRequire('@bsv/overlay');
+      const { SHIPStorage, SLAPStorage } = appRequire('@bsv/overlay-discovery-services');
+      if (Engine && Engine.prototype && !Engine.prototype.__carsDiscoveryDenylistPatched) {
+        const originalSubmit = Engine.prototype.submit;
+        Engine.prototype.__carsDiscoveryDenylistPatched = true;
+        Engine.prototype.submit = async function carsDiscoveryDenylistSubmit(taggedBEEF, ...rest) {
+          try {
+            if (taggedBEEF && Array.isArray(taggedBEEF.beef) && Array.isArray(taggedBEEF.topics)) {
+              const transaction = Transaction.fromBEEF(taggedBEEF.beef);
+              const blockedTopics = new Set();
+              for (const output of transaction.outputs) {
+                try {
+                  const decoded = PushDrop.decode(output.lockingScript);
+                  if (decoded.fields.length < 3) continue;
+                  const protocol = Utils.toUTF8(decoded.fields[0]);
+                  if (protocol !== 'SHIP' && protocol !== 'SLAP') continue;
+                  const domain = normalizeDeniedDomain(Utils.toUTF8(decoded.fields[2]));
+                  if (deniedDiscoveryDomains.has(domain)) {
+                    blockedTopics.add(protocol === 'SHIP' ? 'tm_ship' : 'tm_slap');
+                  }
+                } catch {
+                  // Normal topic managers retain responsibility for non-ad outputs.
+                }
+              }
+              if (blockedTopics.size > 0) {
+                const originalTopics = taggedBEEF.topics.map(String);
+                const filteredTopics = originalTopics.filter(topic => !blockedTopics.has(topic));
+                console.log('CARS_DISCOVERY_DENYLIST ' + JSON.stringify({
+                  txid: transaction.id('hex'),
+                  blockedTopics: [...blockedTopics].sort(),
+                  filteredTopics
+                }));
+                if (filteredTopics.length === 0) {
+                  const steak = {};
+                  for (const topic of originalTopics) {
+                    if (blockedTopics.has(topic)) {
+                      steak[topic] = { outputsToAdmit: [], coinsToRetain: [], coinsRemoved: [] };
+                    }
+                  }
+                  return steak;
+                }
+                taggedBEEF = { ...taggedBEEF, topics: filteredTopics };
+              }
+            }
+          } catch (error) {
+            console.error('CARS_DISCOVERY_DENYLIST inspect failed', error);
+          }
+          return originalSubmit.call(this, taggedBEEF, ...rest);
+        };
+      }
+
+      const patchDiscoveryStorage = (StorageClass, methodName, protocol) => {
+        const prototype = StorageClass && StorageClass.prototype;
+        const marker = '__carsDiscovery' + protocol + 'StoragePatched';
+        if (!prototype || prototype[marker] || typeof prototype[methodName] !== 'function') return;
+        const originalStore = prototype[methodName];
+        prototype[marker] = true;
+        prototype[methodName] = async function carsDiscoveryDenylistStore(
+          txid, outputIndex, identityKey, domain, advertisedName
+        ) {
+          const normalizedDomain = normalizeDeniedDomain(domain);
+          if (deniedDiscoveryDomains.has(normalizedDomain)) {
+            console.log('CARS_DISCOVERY_DENYLIST_STORAGE ' + JSON.stringify({
+              protocol, txid, outputIndex, domain: normalizedDomain, advertisedName
+            }));
+            return;
+          }
+          const collection = protocol === 'SHIP' ? this.shipRecords : this.slapRecords;
+          const capabilityField = protocol === 'SHIP' ? 'topic' : 'service';
+          if (collection) {
+            const capabilityFilter = { domain, [capabilityField]: advertisedName };
+            if (identityKey === preferredDiscoveryIdentityKey) {
+              await collection.deleteMany({
+                ...capabilityFilter,
+                identityKey: { $ne: preferredDiscoveryIdentityKey }
+              });
+            } else if (preferredDiscoveryIdentityKey && await collection.findOne({
+              ...capabilityFilter,
+              identityKey: preferredDiscoveryIdentityKey
+            })) {
+              console.log('CARS_DISCOVERY_DUPLICATE rejected in favor of the controller identity');
+              return;
+            } else {
+              await collection.deleteMany({
+                ...capabilityFilter,
+                identityKey: { $ne: identityKey }
+              });
+            }
+          }
+          return originalStore.call(this, txid, outputIndex, identityKey, domain, advertisedName);
+        };
+      };
+
+      patchDiscoveryStorage(SHIPStorage, 'storeSHIPRecord', 'SHIP');
+      patchDiscoveryStorage(SLAPStorage, 'storeSLAPRecord', 'SLAP');
+      console.log('CARS_DISCOVERY_DENYLIST installed for ' + [...deniedDiscoveryDomains].sort().join(','));
+    } catch (error) {
+      console.error('CARS_DISCOVERY_DENYLIST failed to install', error);
+    }
+  }
 
   if (!express.application.__carsSafeAccessPatched) {
     express.application.__carsSafeAccessPatched = true;
@@ -330,6 +452,14 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
     const lookupCacheMaxEntries = parseNonNegativeInt('SAFE_LOOKUP_CACHE_MAX_ENTRIES', 256);
     const lookupCacheMaxBodyBytes = parseNonNegativeInt('SAFE_LOOKUP_CACHE_MAX_BODY_BYTES', 8 * 1024 * 1024);
     const lookupMutationMaxBodyBytes = parseNonNegativeInt('SAFE_LOOKUP_MUTATION_MAX_BODY_BYTES', 64 * 1024 * 1024);
+    const publicDiscoveryRoot = process.env.CARS_PUBLIC_DISCOVERY_ROOT === 'true';
+    const discoveryProbeTimeoutMs = parseNonNegativeInt('CARS_DISCOVERY_PROBE_TIMEOUT_MS', 1500);
+    const discoveryLiveTtlMs = parseNonNegativeInt('CARS_DISCOVERY_LIVE_TTL_MS', 60 * 1000);
+    const discoveryDeadTtlMs = parseNonNegativeInt('CARS_DISCOVERY_DEAD_TTL_MS', 30 * 1000);
+    const discoveryLookupCacheTtlMs = parseNonNegativeInt('CARS_DISCOVERY_LOOKUP_CACHE_TTL_MS', 30 * 1000);
+    const discoveryProbeConcurrency = Math.max(1, parseNonNegativeInt('CARS_DISCOVERY_PROBE_CONCURRENCY', 8));
+    const discoveryProbeCache = new Map();
+    const discoveryProbeInflight = new Map();
 
     const byteLength = (value) => {
       if (value == null) return 0;
@@ -361,6 +491,268 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
     const hashValue = (value) => {
       const json = stableJson(value);
       return json ? crypto.createHash('sha256').update(json).digest('hex') : undefined;
+    };
+
+    const discoveryService = (body) => body && (
+      body.service || body.lookupService || body.serviceName
+    );
+
+    const isDiscoveryLookup = (body) => publicDiscoveryRoot && (
+      discoveryService(body) === 'ls_ship' || discoveryService(body) === 'ls_slap'
+    );
+
+    const normalizeDiscoveryDomain = (domain) => {
+      const url = new URL(String(domain));
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+        throw new Error('Advertisement domain must use HTTP or HTTPS');
+      }
+      url.username = '';
+      url.password = '';
+      url.hash = '';
+      url.search = '';
+      return url.toString().replace(/\\\/$/, '');
+    };
+
+    const mapWithConcurrency = async (items, limit, callback) => {
+      const results = new Array(items.length);
+      let cursor = 0;
+      const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (cursor < items.length) {
+          const index = cursor;
+          cursor += 1;
+          results[index] = await callback(items[index], index);
+        }
+      });
+      await Promise.all(workers);
+      return results;
+    };
+
+    const isPublicProbeAddress = (address) => {
+      const family = net.isIP(address);
+      if (family === 4) {
+        const octets = address.split('.').map(Number);
+        const [a, b] = octets;
+        return !(
+          a === 0 || a === 10 || a === 127 ||
+          (a === 100 && b >= 64 && b <= 127) ||
+          (a === 169 && b === 254) ||
+          (a === 172 && b >= 16 && b <= 31) ||
+          (a === 192 && (b === 0 || b === 168)) ||
+          (a === 198 && (b === 18 || b === 19 || b === 51)) ||
+          (a === 203 && b === 0) || a >= 224
+        );
+      }
+      if (family === 6) {
+        const normalized = address.toLowerCase();
+        return !(
+          normalized === '::' || normalized === '::1' ||
+          normalized.startsWith('fc') || normalized.startsWith('fd') ||
+          normalized.startsWith('fe8') || normalized.startsWith('fe9') ||
+          normalized.startsWith('fea') || normalized.startsWith('feb') ||
+          normalized.startsWith('ff') || normalized.startsWith('2001:db8:') ||
+          normalized.startsWith('::ffff:')
+        );
+      }
+      return false;
+    };
+
+    const fetchPublicInventory = async (endpoint) => {
+      const hostname = endpoint.hostname.toLowerCase();
+      if (
+        hostname === 'localhost' || hostname.endsWith('.local') ||
+        hostname.endsWith('.internal') || hostname.endsWith('.cluster.local')
+      ) throw new Error('Discovery probes require a public hostname');
+      const addresses = await dns.lookup(hostname, { all: true, verbatim: true });
+      const target = addresses.find(candidate => isPublicProbeAddress(candidate.address));
+      if (!target) throw new Error('Discovery hostname has no public address');
+
+      return new Promise((resolve, reject) => {
+        const transport = endpoint.protocol === 'https:' ? https : http;
+        const request = transport.request(endpoint, {
+          method: 'GET',
+          headers: { accept: 'application/json' },
+          lookup: (_hostname, options, callback) => {
+            if (options && options.all) callback(null, [target]);
+            else callback(null, target.address, target.family);
+          }
+        }, response => {
+          if ((response.statusCode || 0) < 200 || (response.statusCode || 0) >= 300) {
+            response.resume();
+            resolve(undefined);
+            return;
+          }
+          const chunks = [];
+          let bytes = 0;
+          response.on('data', chunk => {
+            bytes += chunk.length;
+            if (bytes > 256 * 1024) {
+              request.destroy(new Error('Discovery inventory response is too large'));
+              return;
+            }
+            chunks.push(chunk);
+          });
+          response.on('end', () => {
+            try {
+              resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+            } catch (error) {
+              reject(error);
+            }
+          });
+        });
+        request.setTimeout(discoveryProbeTimeoutMs, () => {
+          request.destroy(new Error('Discovery inventory probe timed out'));
+        });
+        request.on('error', reject);
+        request.end();
+      });
+    };
+
+    const probeDiscoveryCapability = async (descriptor) => {
+      const key = stableJson([descriptor.protocol, descriptor.domain, descriptor.capability]);
+      if (deniedDiscoveryDomains.has(normalizeDeniedDomain(descriptor.domain))) return false;
+      const now = Date.now();
+      const cached = discoveryProbeCache.get(key);
+      if (cached && cached.expiresAt > now) return cached.live;
+      const inflight = discoveryProbeInflight.get(key);
+      if (inflight) return inflight;
+
+      const probe = (async () => {
+        const path = descriptor.protocol === 'SHIP'
+          ? '/listTopicManagers'
+          : '/listLookupServiceProviders';
+        let live = false;
+        try {
+          const inventory = await fetchPublicInventory(new URL(path, descriptor.domain));
+          live = Boolean(
+            inventory && typeof inventory === 'object' &&
+            Object.prototype.hasOwnProperty.call(inventory, descriptor.capability)
+          );
+        } catch {
+          live = false;
+        }
+        discoveryProbeCache.set(key, {
+          live,
+          expiresAt: Date.now() + (live ? discoveryLiveTtlMs : discoveryDeadTtlMs)
+        });
+        return live;
+      })().finally(() => discoveryProbeInflight.delete(key));
+      discoveryProbeInflight.set(key, probe);
+      return probe;
+    };
+
+    const parseDiscoveryOutput = (item, expectedProtocol, index) => {
+      try {
+        const beef = Array.isArray(item && item.beef)
+          ? item.beef
+          : Array.from(Buffer.from((item && item.beef && item.beef.data) || []));
+        const outputIndex = Number(item && item.outputIndex);
+        if (!beef.length || !Number.isInteger(outputIndex) || outputIndex < 0) return undefined;
+        const transaction = Transaction.fromBEEF(beef);
+        const output = transaction.outputs[outputIndex];
+        if (!output) return undefined;
+        const decoded = PushDrop.decode(output.lockingScript);
+        if (decoded.fields.length < 4) return undefined;
+        const protocol = Utils.toUTF8(decoded.fields[0]);
+        if (protocol !== expectedProtocol) return undefined;
+        const domain = normalizeDiscoveryDomain(Utils.toUTF8(decoded.fields[2]));
+        const capability = Utils.toUTF8(decoded.fields[3]);
+        return {
+          item,
+          index,
+          protocol,
+          domain,
+          capability,
+          blockHeight: transaction.merklePath?.blockHeight ?? -1,
+          txid: transaction.id('hex'),
+          outputIndex
+        };
+      } catch {
+        return undefined;
+      }
+    };
+
+    const compareDiscoveryOutput = (left, right) => {
+      if (left.blockHeight !== right.blockHeight) return right.blockHeight - left.blockHeight;
+      const txidOrder = right.txid.localeCompare(left.txid);
+      if (txidOrder) return txidOrder;
+      return right.outputIndex - left.outputIndex;
+    };
+
+    const filterDiscoveryLookupPayload = async (buffer, service) => {
+      if (!publicDiscoveryRoot || !buffer || buffer.length > lookupMutationMaxBodyBytes) return undefined;
+      const expectedProtocol = service === 'ls_ship' ? 'SHIP' : service === 'ls_slap' ? 'SLAP' : undefined;
+      if (!expectedProtocol) return undefined;
+      const parsed = JSON.parse(buffer.toString('utf8'));
+      if (!parsed || typeof parsed !== 'object') return undefined;
+      const outputKey = ['outputs', 'results', 'outputList'].find(key => Array.isArray(parsed[key]));
+      if (!outputKey) return undefined;
+      const original = parsed[outputKey];
+      const groups = new Map();
+      let unreadable = 0;
+      for (let index = 0; index < original.length; index += 1) {
+        const descriptor = parseDiscoveryOutput(original[index], expectedProtocol, index);
+        if (!descriptor) {
+          unreadable += 1;
+          continue;
+        }
+        const key = stableJson([descriptor.protocol, descriptor.domain, descriptor.capability]);
+        const group = groups.get(key) || [];
+        group.push(descriptor);
+        groups.set(key, group);
+      }
+      const grouped = [...groups.values()];
+      const evaluated = await mapWithConcurrency(grouped, discoveryProbeConcurrency, async group => ({
+        group,
+        live: await probeDiscoveryCapability(group[0])
+      }));
+      const winners = [];
+      let unavailable = 0;
+      let duplicates = 0;
+      for (const { group, live } of evaluated) {
+        if (!live) {
+          unavailable += group.length;
+          continue;
+        }
+        group.sort(compareDiscoveryOutput);
+        winners.push(group[0]);
+        duplicates += Math.max(0, group.length - 1);
+      }
+      winners.sort((left, right) => left.index - right.index);
+      parsed[outputKey] = winners.map(winner => winner.item);
+      const body = Buffer.from(JSON.stringify(parsed));
+      return {
+        body,
+        originalOutputCount: original.length,
+        dedupedOutputCount: winners.length,
+        originalBytes: buffer.length,
+        dedupedBytes: body.length,
+        unavailableOutputCount: unavailable,
+        duplicateOutputCount: duplicates,
+        unreadableOutputCount: unreadable
+      };
+    };
+
+    const emptyDiscoveryLookupPayload = (buffer) => {
+      try {
+        const parsed = JSON.parse(buffer.toString('utf8'));
+        const outputKey = ['outputs', 'results', 'outputList'].find(key => Array.isArray(parsed && parsed[key]));
+        if (!outputKey) return undefined;
+        const originalOutputCount = parsed[outputKey].length;
+        parsed[outputKey] = [];
+        const body = Buffer.from(JSON.stringify(parsed));
+        return {
+          body,
+          originalOutputCount,
+          dedupedOutputCount: 0,
+          originalBytes: buffer.length,
+          dedupedBytes: body.length,
+          unavailableOutputCount: originalOutputCount,
+          duplicateOutputCount: 0,
+          unreadableOutputCount: 0
+        };
+      } catch {
+        return undefined;
+      }
     };
 
     const lookupRequestKey = (req, body) => {
@@ -448,6 +840,9 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
         info.outputCount = dedupeInfo.dedupedOutputCount;
         info.dedupedResponseBytes = dedupeInfo.dedupedBytes;
         info.originalResponseBytes = dedupeInfo.originalBytes;
+        info.unavailableOutputCount = dedupeInfo.unavailableOutputCount;
+        info.duplicateOutputCount = dedupeInfo.duplicateOutputCount;
+        info.unreadableOutputCount = dedupeInfo.unreadableOutputCount;
       }
       if (truncated) return info;
       const text = Buffer.concat(chunks.map((chunk) => (
@@ -507,27 +902,21 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
         return originalWrite.call(this, chunk, encoding, callback);
       };
 
-      res.end = function patchedEnd(chunk, encoding, callback) {
-        if (typeof chunk === 'function') {
-          callback = chunk;
-          chunk = undefined;
-          encoding = undefined;
-        } else if (typeof encoding === 'function') {
-          callback = encoding;
-          encoding = undefined;
-        }
-
+      const finishEnd = (context, chunk, encoding, callback, discoveryInfo) => {
         let outgoingChunk = chunk;
         if (route === '/lookup' && !sawWrite && chunk && res.statusCode >= 200 && res.statusCode < 300 && !res.getHeader('content-encoding')) {
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), typeof encoding === 'string' ? encoding : undefined);
-          const deduped = dedupeLookupPayload(buffer);
+          const deduped = discoveryInfo || dedupeLookupPayload(buffer);
           if (deduped) {
             dedupeInfo = deduped;
             outgoingChunk = deduped.body;
             if (res.getHeader('content-length')) res.setHeader('Content-Length', String(deduped.body.length));
             res.setHeader('X-CARS-Lookup-Deduped', 'true');
+            if (discoveryInfo) res.setHeader('X-CARS-Discovery-Filtered', 'true');
             if (deduped.originalOutputCount !== undefined) res.setHeader('X-CARS-Lookup-Original-Count', String(deduped.originalOutputCount));
             if (deduped.dedupedOutputCount !== undefined) res.setHeader('X-CARS-Lookup-Output-Count', String(deduped.dedupedOutputCount));
+            if (deduped.unavailableOutputCount !== undefined) res.setHeader('X-CARS-Discovery-Unavailable-Count', String(deduped.unavailableOutputCount));
+            if (deduped.duplicateOutputCount !== undefined) res.setHeader('X-CARS-Discovery-Duplicate-Count', String(deduped.duplicateOutputCount));
           }
 
           const outgoingBuffer = Buffer.isBuffer(outgoingChunk) ? outgoingChunk : Buffer.from(String(outgoingChunk), typeof encoding === 'string' ? encoding : undefined);
@@ -539,21 +928,54 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
         }
 
         captureChunk(outgoingChunk, encoding);
-        return originalEnd.call(this, outgoingChunk, encoding, callback);
+        return originalEnd.call(context, outgoingChunk, encoding, callback);
+      };
+
+      res.end = function patchedEnd(chunk, encoding, callback) {
+        if (typeof chunk === 'function') {
+          callback = chunk;
+          chunk = undefined;
+          encoding = undefined;
+        } else if (typeof encoding === 'function') {
+          callback = encoding;
+          encoding = undefined;
+        }
+
+        const body = req.body && typeof req.body === 'object' ? req.body : {};
+        if (
+          route === '/lookup' && isDiscoveryLookup(body) && !sawWrite && chunk &&
+          res.statusCode >= 200 && res.statusCode < 300 && !res.getHeader('content-encoding')
+        ) {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), typeof encoding === 'string' ? encoding : undefined);
+          const context = this;
+          void filterDiscoveryLookupPayload(buffer, discoveryService(body))
+            .then(filtered => finishEnd(context, chunk, encoding, callback, filtered || emptyDiscoveryLookupPayload(buffer)))
+            .catch(error => {
+              console.error('CARS_DISCOVERY_FILTER ' + JSON.stringify({
+                ts: new Date().toISOString(),
+                service: discoveryService(body),
+                error: String(error && error.message || error).slice(0, 500)
+              }));
+              finishEnd(context, chunk, encoding, callback, emptyDiscoveryLookupPayload(buffer));
+            });
+          return this;
+        }
+        return finishEnd(this, chunk, encoding, callback);
       };
 
       res.on('finish', () => {
         const body = req.body && typeof req.body === 'object' ? req.body : {};
         const query = body.query && typeof body.query === 'object' ? body.query : undefined;
         const responseInfo = collectResponseInfo(responseBytes, responseChunks, responseTruncated, dedupeInfo);
-        if (route === '/lookup' && lookupCacheEnabled && !lookupCacheHit && cacheableResponseBody && res.statusCode >= 200 && res.statusCode < 300 && lookupCacheTtlMs > 0 && lookupCacheMaxEntries > 0) {
+        const cacheTtlMs = isDiscoveryLookup(body) ? discoveryLookupCacheTtlMs : lookupCacheTtlMs;
+        if (route === '/lookup' && lookupCacheEnabled && !lookupCacheHit && cacheableResponseBody && res.statusCode >= 200 && res.statusCode < 300 && cacheTtlMs > 0 && lookupCacheMaxEntries > 0) {
           const cacheKey = lookupRequestKey(req, body);
           if (cacheKey) {
             lookupCache.set(cacheKey, {
               body: cacheableResponseBody,
               contentType: cacheableContentType,
               statusCode: res.statusCode,
-              expiresAt: Date.now() + lookupCacheTtlMs
+              expiresAt: Date.now() + cacheTtlMs
             });
             while (lookupCache.size > lookupCacheMaxEntries) {
               const oldestKey = lookupCache.keys().next().value;
@@ -583,6 +1005,9 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
           record.originalOutputCount = responseInfo.originalOutputCount;
           record.originalResponseBytes = responseInfo.originalResponseBytes;
           record.dedupedResponseBytes = responseInfo.dedupedResponseBytes;
+          record.unavailableOutputCount = responseInfo.unavailableOutputCount;
+          record.duplicateOutputCount = responseInfo.duplicateOutputCount;
+          record.unreadableOutputCount = responseInfo.unreadableOutputCount;
           record.lookupCacheHit = lookupCacheHit;
         } else if (route === '/submit') {
           const topics = Array.isArray(body.topics) ? body.topics : (body.topic ? [body.topic] : []);

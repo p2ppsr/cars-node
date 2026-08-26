@@ -131,6 +131,10 @@ test('control-plane image and deploy path pin and verify the production supply c
     path.join(__dirname, '..', 'scripts', 'k8s', 'reconcile-users-public-discovery-root.sh'),
     'utf8'
   )
+  const evictionScript = fs.readFileSync(
+    path.join(__dirname, '..', 'scripts', 'k8s', 'evict-denied-discovery-records.sh'),
+    'utf8'
+  )
 
   assert.match(dockerfile, /buildah\/stable:v1\.43\.2@sha256:[0-9a-f]{64}/)
   assert.match(dockerfile, /ARG NODE_VERSION=24\.19\.0/)
@@ -162,6 +166,11 @@ test('control-plane image and deploy path pin and verify the production supply c
   assert.match(publicRootScript, /ls_users[\s\S]+ls_ship[\s\S]+ls_slap/)
   assert.match(publicRootScript, /tm_kvstore/)
   assert.match(publicRootScript, /ls_kvstore/)
+  assert.match(publicRootScript, /filterDiscoveryLookupPayload/)
+  assert.match(publicRootScript, /expected one live, deduplicated KVStore provider/)
+  assert.match(evictionScript, /networkOpsDiscoveryEvictions/)
+  assert.match(evictionScript, /semantic-provider-capability-duplicate/)
+  assert.match(deployScript, /evict-denied-discovery-records\.sh/)
   assert.doesNotMatch(
     fs.readFileSync(path.join(__dirname, '..', 'scripts', 'k8s', 'build-local-image.sh'), 'utf8'),
     /node -[ep]/
@@ -192,6 +201,12 @@ test('legacy index shim disables local discovery services and advertisement writ
   assert.match(thinIndex, /CARSNodePushDrop/)
   assert.match(requestLogger, /CARS_CENTRALIZED_ADVERTISEMENTS/)
   assert.match(requestLogger, /randomBytes\(32\)/)
+  assert.match(requestLogger, /filterDiscoveryLookupPayload/)
+  assert.match(requestLogger, /probeDiscoveryCapability/)
+  assert.match(requestLogger, /X-CARS-Discovery-Filtered/)
+  assert.match(requestLogger, /CARS_DISCOVERY_DENYLIST_STORAGE/)
+  assert.match(requestLogger, /Discovery probes require a public hostname/)
+  assert.match(requestLogger, /isPublicProbeAddress/)
   assert.doesNotMatch(requestLogger, /overlay-express/)
   assert.equal(generateCentralizedAdvertisementsIndexTs(thinIndex), thinIndex)
 })

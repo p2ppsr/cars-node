@@ -34,7 +34,7 @@
         "@bsv/overlay-discovery-services": "2.2.0",
         "@bsv/overlay-express": "2.6.0",
         "@bsv/payment-express-middleware": "^2.0.1",
-        "@bsv/sdk": "2.4.0",
+        "@bsv/sdk": "2.4.1",
         "@bsv/wallet-toolbox": "2.7.0",
         "@bsv/wallet-toolbox-client": "2.7.0",
         "@sendgrid/mail": "^8.1.4",
