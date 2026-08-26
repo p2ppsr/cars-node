@@ -1,0 +1,69 @@
+name: Audit Discovery Hosts
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Independent probe rounds
+        required: true
+        default: '3'
+        type: string
+      timeout_ms:
+        description: Per-request timeout in milliseconds
+        required: true
+        default: '3000'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on:
+      - self-hosted
+      - evans-creek-local-deploy
+      - linux-amd64
+      - docker
+      - kubectl
+      - local-registry
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Audit authoritative SHIP and SLAP records
+        env:
+          AUDIT_ROUNDS: ${{ inputs.rounds }}
+          AUDIT_TIMEOUT_MS: ${{ inputs.timeout_ms }}
+          AUDIT_OUTPUT: discovery-host-audit.json
+        run: scripts/k8s/audit-discovery-hosts.sh
+
+      - name: Summarize candidates
+        if: always()
+        run: |
+          if [[ ! -s discovery-host-audit.json ]]; then
+            echo 'Discovery audit did not produce a report.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          node <<'NODE' >> "$GITHUB_STEP_SUMMARY"
+          const report = require('./discovery-host-audit.json');
+          console.log('# Discovery host audit');
+          console.log('');
+          console.log(`Audited ${report.source.distinctDomains} domains over ${report.parameters.rounds} rounds.`);
+          console.log('');
+          console.log(`- Live: ${report.summary.live}`);
+          console.log(`- Deny candidates: ${report.summary.denyCandidates}`);
+          console.log(`- Unstable or partial: ${report.summary.unstableOrPartial}`);
+          console.log('');
+          console.log('## Deny candidates');
+          console.log('');
+          if (report.denyCandidates.length === 0) console.log('None.');
+          for (const domain of report.denyCandidates) console.log(`- ${domain}`);
+          NODE
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discovery-host-audit-${{ github.run_id }}
+          path: discovery-host-audit.json
+          if-no-files-found: error
+          retention-days: 30
