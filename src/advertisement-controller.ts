@@ -5,6 +5,7 @@ import logger from './logger';
 import { normalizeProjectNetwork, projectNetworkToOverlayNetwork, type ProjectNetwork } from './network';
 import { PassiveAdvertiser } from './advertisements/passive-advertiser';
 import { AdvertisementReconciler, type ReconcileReport } from './advertisements/reconciler';
+import { installDiscoveryDenylist } from './discovery-denylist';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -109,6 +110,7 @@ async function main() {
   if (!server.engine) throw new Error('Advertisement overlay engine was not configured');
 
   const reconciler = new AdvertisementReconciler(db, server.engine, privateKey, network);
+  installDiscoveryDenylist(undefined, reconciler.identityKey);
   const leader = new MySqlLeaderLease(db, `cars-advertisement-controller:${network}`);
   let lastReconcile: ReconcileReport | undefined;
   let lastGaspAt: string | undefined;

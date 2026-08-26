@@ -18,6 +18,22 @@ index_key="cars-thin-index.ts"
 
 current_index="$(${kubectl_cmd} -n "${namespace}" get configmap "${configmap}" \
   -o go-template='{{index .data "cars-thin-index.ts"}}')"
+request_logger="$(${kubectl_cmd} -n cars-operator-system exec deployment/cars -c cars -- node -e '
+const utils = require("./dist/src/utils.js");
+process.stdout.write(utils.generateSafeAccessLoggerCjs());
+')"
+denied_domains="$(${kubectl_cmd} -n cars-operator-system exec deployment/cars -c cars -- node -e '
+const { DEFAULT_DISCOVERY_DENYLIST } = require("./dist/src/discovery-denylist.js");
+process.stdout.write(DEFAULT_DISCOVERY_DENYLIST.join(","));
+')"
+preferred_identity_key="$(${kubectl_cmd} -n cars-operator-system exec deployment/cars-advertisement-controller -c controller -- node -e '
+const { KeyDeriver, PrivateKey } = require("@bsv/sdk");
+process.stdout.write(new KeyDeriver(new PrivateKey(process.env.CARS_ADVERTISEMENT_PRIVATE_KEY, "hex")).identityKey);
+')"
+[[ "${request_logger}" == *"filterDiscoveryLookupPayload"* ]] || {
+  echo "live CARS image does not contain discovery liveness filtering" >&2
+  exit 1
+}
 
 if [[ "${current_index}" == *"server.configureEngine(publicDiscoveryRoot)"* ]]; then
   patched_index="${current_index}"
@@ -30,22 +46,29 @@ else
   exit 1
 fi
 
-if [[ "${patched_index}" != "${current_index}" ]]; then
-  patch_json="$({ printf '%s' "${patched_index}"; } | node -e '
-let source = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => { source += chunk; });
-process.stdin.on("end", () => process.stdout.write(JSON.stringify({ data: { "cars-thin-index.ts": source } })));
+patch_json="$({ printf '%s' "${patched_index}"; printf '\0'; printf '%s' "${request_logger}"; } | node -e '
+const chunks = [];
+process.stdin.on("data", chunk => { chunks.push(chunk); });
+process.stdin.on("end", () => {
+  const input = Buffer.concat(chunks);
+  const separator = input.indexOf(0);
+  if (separator < 0) throw new Error("ConfigMap input separator is missing");
+  process.stdout.write(JSON.stringify({ data: {
+    "cars-thin-index.ts": input.subarray(0, separator).toString("utf8"),
+    "safe-access-logger.cjs": input.subarray(separator + 1).toString("utf8")
+  } }));
+});
 ')"
-  "${kubectl_cmd}" -n "${namespace}" patch configmap "${configmap}" --type merge -p "${patch_json}"
-fi
+"${kubectl_cmd}" -n "${namespace}" patch configmap "${configmap}" --type merge -p "${patch_json}"
 
 root_enabled="false"
 if [[ "${mode}" == "enable" ]]; then
   root_enabled="true"
 fi
 "${kubectl_cmd}" -n "${namespace}" set env "deployment/${deployment}" -c backend \
-  "CARS_PUBLIC_DISCOVERY_ROOT=${root_enabled}"
+  "CARS_PUBLIC_DISCOVERY_ROOT=${root_enabled}" \
+  "CARS_BANNED_AD_DOMAINS=${denied_domains}" \
+  "CARS_DISCOVERY_PREFERRED_IDENTITY_KEY=${preferred_identity_key}"
 "${kubectl_cmd}" -n "${namespace}" annotate "deployment/${deployment}" \
   "network-ops.babbage.systems/public-discovery-root=${root_enabled}" \
   "network-ops.babbage.systems/source-sha=${SOURCE_SHA:-unknown}" \
@@ -111,6 +134,9 @@ async function lookup(service, query) {
     lookup('ls_ship', { topics: ['tm_kvstore'] }),
     lookup('ls_slap', { service: 'ls_kvstore' }),
   ]);
+  if (shipOutputs !== 1 || slapOutputs !== 1) {
+    throw new Error(`expected one live, deduplicated KVStore provider; received SHIP=${shipOutputs} SLAP=${slapOutputs}`);
+  }
   console.log(JSON.stringify({ publicRoot: base, shipOutputs, slapOutputs }));
 })().catch(error => { console.error(error); process.exit(1); });
 NODE

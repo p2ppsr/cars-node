@@ -34,6 +34,7 @@ import {
 import { inspectProjectCapabilities, replaceProjectCapabilities } from '../advertisements/registry';
 import { buildProjectIngressTls } from '../ingress-tls';
 import { isPublicDiscoveryRoot } from '../public-discovery-root';
+import { DEFAULT_DISCOVERY_DENYLIST } from '../discovery-denylist';
 
 const projectsDomain: string = process.env.PROJECT_DEPLOYMENT_DNS_NAME!;
 
@@ -392,6 +393,9 @@ EXPOSE 80`
     const adminBearerTokenEnv = project.admin_bearer_token || '';
     const suppressDefaultSyncAdvertisements = engineConfigObj.suppressDefaultSyncAdvertisements === false ? 'false' : 'true';
     const publicDiscoveryRootEnv = isPublicDiscoveryRoot(project.backend_custom_domain) ? 'true' : 'false';
+    const discoveryDenylistEnv = publicDiscoveryRootEnv === 'true'
+      ? DEFAULT_DISCOVERY_DENYLIST.join(',')
+      : '';
 
     const overlayNetwork = projectNetworkToOverlayNetwork(projectNetwork);
     const propagationProviderEnv = Object.entries(
@@ -600,6 +604,8 @@ spec:
           value: "${safeRequestLoggingEnv}"
         - name: CARS_PUBLIC_DISCOVERY_ROOT
           value: "${publicDiscoveryRootEnv}"
+        - name: CARS_BANNED_AD_DOMAINS
+          value: "${discoveryDenylistEnv}"
         - name: GASP_SYNC
           value: "${gaspSyncEnv}"
         - name: NETWORK

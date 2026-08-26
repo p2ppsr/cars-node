@@ -68,6 +68,7 @@ curl --fail --show-error --silent https://cars.babbage.systems/health/live >/dev
 curl --fail --show-error --silent https://cars.babbage.systems/health/ready >/dev/null
 "${kubectl_cmd}" -n cars-operator-system get --raw "/api/v1/namespaces/cars-operator-system/services/http:cars-advertisement-controller:8081/proxy/health/ready" >/dev/null
 
+KUBECTL="${kubectl_cmd}" scripts/k8s/evict-denied-discovery-records.sh
 KUBECTL="${kubectl_cmd}" SOURCE_SHA="${SOURCE_SHA}" \
   scripts/k8s/reconcile-users-public-discovery-root.sh enable
 

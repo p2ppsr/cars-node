@@ -29,6 +29,72 @@ function tuple(protocol: string, domain: string, capability: string): string {
   return `${protocol}\u0000${domain}\u0000${capability}`;
 }
 
+function advertisementRank(advertisement: Advertisement): [number, string, number] {
+  if (advertisement.beef === undefined || advertisement.outputIndex === undefined) {
+    return [-1, '', -1];
+  }
+  try {
+    const transaction = Transaction.fromBEEF(advertisement.beef);
+    return [
+      transaction.merklePath?.blockHeight ?? -1,
+      transaction.id('hex'),
+      advertisement.outputIndex,
+    ];
+  } catch {
+    return [-1, '', advertisement.outputIndex];
+  }
+}
+
+function compareAdvertisementRank(left: Advertisement, right: Advertisement): number {
+  const leftRank = advertisementRank(left);
+  const rightRank = advertisementRank(right);
+  for (let index = 0; index < leftRank.length; index += 1) {
+    if (leftRank[index] === rightRank[index]) continue;
+    return leftRank[index] > rightRank[index] ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Revoke every non-desired output and all but the newest output for each
+ * desired tuple. Advertisement lookup is output-oriented, so merely checking
+ * a Set of observed tuples leaves retry-created duplicates live forever.
+ */
+export function selectAdvertisementsToRevoke(
+  desired: DesiredAdvertisement[],
+  observed: Advertisement[],
+): Advertisement[] {
+  const desiredKeys = new Set(
+    desired.map(advertisement => tuple(
+      advertisement.protocol,
+      advertisement.domain,
+      advertisement.capability,
+    )),
+  );
+  const groups = new Map<string, Advertisement[]>();
+  for (const advertisement of observed) {
+    const key = tuple(
+      advertisement.protocol,
+      advertisement.domain,
+      advertisement.topicOrService,
+    );
+    const group = groups.get(key) || [];
+    group.push(advertisement);
+    groups.set(key, group);
+  }
+
+  const revocations: Advertisement[] = [];
+  for (const [key, advertisements] of groups) {
+    if (!desiredKeys.has(key)) {
+      revocations.push(...advertisements);
+      continue;
+    }
+    advertisements.sort(compareAdvertisementRank);
+    revocations.push(...advertisements.slice(1));
+  }
+  return revocations;
+}
+
 function toChain(network: ProjectNetwork): WalletChain {
   if (network === 'mainnet') return 'main';
   if (network === 'testnet') return 'test';
@@ -54,7 +120,11 @@ export class AdvertisementReconciler {
       .select('network', 'protocol', 'domain', 'capability')
       .where({ active: true, network: this.network })
       .orderBy(['domain', 'protocol', 'capability']);
-    return rows as DesiredAdvertisement[];
+    const unique = new Map<string, DesiredAdvertisement>();
+    for (const row of rows as DesiredAdvertisement[]) {
+      unique.set(tuple(row.protocol, row.domain, row.capability), row);
+    }
+    return [...unique.values()];
   }
 
   async observedAdvertisements(): Promise<Advertisement[]> {
@@ -121,19 +191,26 @@ export class AdvertisementReconciler {
       // Re-read from authoritative local discovery state before calculating
       // revocations. This makes retry after an ambiguous submit idempotent.
       observed = await this.observedAdvertisements();
-      const desiredKeys = new Set(desired.map(ad => tuple(ad.protocol, ad.domain, ad.capability)));
-      const stale = observed.filter(ad => !desiredKeys.has(tuple(ad.protocol, ad.domain, ad.topicOrService)));
-      for (let offset = 0; offset < stale.length; offset += 20) {
-        const batch = stale.slice(offset, offset + 20);
-        const advertiser = await this.advertiserForDomain(batch[0].domain);
-        const taggedBEEF = await advertiser.revokeAdvertisements(batch);
-        await this.submitAndRecord('revoke', batch.map(ad => ({
-          network: this.network,
-          protocol: ad.protocol,
-          domain: ad.domain,
-          capability: ad.topicOrService,
-        })), taggedBEEF);
-        revoked += batch.length;
+      const staleOrDuplicate = selectAdvertisementsToRevoke(desired, observed);
+      const revocationsByDomain = new Map<string, Advertisement[]>();
+      for (const advertisement of staleOrDuplicate) {
+        const batch = revocationsByDomain.get(advertisement.domain) || [];
+        batch.push(advertisement);
+        revocationsByDomain.set(advertisement.domain, batch);
+      }
+      for (const [domain, advertisements] of revocationsByDomain) {
+        for (let offset = 0; offset < advertisements.length; offset += 20) {
+          const batch = advertisements.slice(offset, offset + 20);
+          const advertiser = await this.advertiserForDomain(domain);
+          const taggedBEEF = await advertiser.revokeAdvertisements(batch);
+          await this.submitAndRecord('revoke', batch.map(ad => ({
+            network: this.network,
+            protocol: ad.protocol,
+            domain: ad.domain,
+            capability: ad.topicOrService,
+          })), taggedBEEF);
+          revoked += batch.length;
+        }
       }
 
       return {
