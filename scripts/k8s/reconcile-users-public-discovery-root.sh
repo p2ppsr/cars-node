@@ -37,8 +37,12 @@ process.stdout.write(new KeyDeriver(new PrivateKey(process.env.CARS_ADVERTISEMEN
 
 if [[ "${current_index}" == *"server.configureEngine(publicDiscoveryRoot)"* ]]; then
   patched_index="${current_index}"
+elif [[ "${mode}" == "enable" && "${current_index}" == *"await server.configureEngine(true);"* ]]; then
+  patched_index="${current_index}"
 elif [[ "${mode}" == "enable" && "${current_index}" == *"await server.configureEngine(false);"* ]]; then
   patched_index="${current_index/await server.configureEngine(false);/await server.configureEngine(true);}"
+elif [[ "${mode}" == "disable" && "${current_index}" == *"await server.configureEngine(false);"* ]]; then
+  patched_index="${current_index}"
 elif [[ "${mode}" == "disable" && "${current_index}" == *"await server.configureEngine(true);"* ]]; then
   patched_index="${current_index/await server.configureEngine(true);/await server.configureEngine(false);}"
 else
