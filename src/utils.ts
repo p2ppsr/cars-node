@@ -48,6 +48,7 @@ const main = async () => {
     process.env.HOSTING_URL!,
     process.env.ADMIN_BEARER_TOKEN // 4th param is optional
   );
+  const publicDiscoveryRoot = process.env.CARS_PUBLIC_DISCOVERY_ROOT === 'true';
 
   // Basic server config
   server.configurePort(8080);
@@ -172,12 +173,16 @@ const main = async () => {
       serviceType: 'cars-project-backend',
       hostingUrl: process.env.HOSTING_URL,
       network: process.env.NETWORK,
+      publicDiscoveryRoot,
       gaspSyncEnabled: process.env.GASP_SYNC === 'true',
-      topicManagers: ${topicManagerNames},
-      lookupServices: ${lookupServiceNames}
+      topicManagers: [...${topicManagerNames}, ...(publicDiscoveryRoot ? ['tm_ship', 'tm_slap'] : [])],
+      lookupServices: [...${lookupServiceNames}, ...(publicDiscoveryRoot ? ['ls_ship', 'ls_slap'] : [])]
     })
   });
-  await server.configureEngine(false);
+  // A designated public root serves the shared SHIP/SLAP state for SDK
+  // bootstrap compatibility. Its passive advertiser above keeps all
+  // advertisement authorship in the centralized controller.
+  await server.configureEngine(publicDiscoveryRoot);
   await server.start();
 };
 
@@ -207,7 +212,7 @@ export function generatePackageJson(backendDependencies: Record<string, string>)
     "dependencies": {
       ...backendDependencies,
       "@bsv/overlay-express": "2.6.0",
-      "@bsv/sdk": "2.4.0",
+      "@bsv/sdk": "2.4.1",
       "mysql2": "^3.11.5",
       "tsx": "^4.19.2",
       "chalk": "^5.3.0"

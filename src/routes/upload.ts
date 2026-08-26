@@ -33,6 +33,7 @@ import {
 } from '../network';
 import { inspectProjectCapabilities, replaceProjectCapabilities } from '../advertisements/registry';
 import { buildProjectIngressTls } from '../ingress-tls';
+import { isPublicDiscoveryRoot } from '../public-discovery-root';
 
 const projectsDomain: string = process.env.PROJECT_DEPLOYMENT_DNS_NAME!;
 
@@ -390,6 +391,7 @@ EXPOSE 80`
     const throwOnBroadcastFailEnv = engineConfigObj.throwOnBroadcastFailure === true ? 'true' : 'false';
     const adminBearerTokenEnv = project.admin_bearer_token || '';
     const suppressDefaultSyncAdvertisements = engineConfigObj.suppressDefaultSyncAdvertisements === false ? 'false' : 'true';
+    const publicDiscoveryRootEnv = isPublicDiscoveryRoot(project.backend_custom_domain) ? 'true' : 'false';
 
     const overlayNetwork = projectNetworkToOverlayNetwork(projectNetwork);
     const propagationProviderEnv = Object.entries(
@@ -596,6 +598,8 @@ spec:
           value: "${requestLoggingEnv}"
         - name: SAFE_REQUEST_LOGGING
           value: "${safeRequestLoggingEnv}"
+        - name: CARS_PUBLIC_DISCOVERY_ROOT
+          value: "${publicDiscoveryRootEnv}"
         - name: GASP_SYNC
           value: "${gaspSyncEnv}"
         - name: NETWORK
