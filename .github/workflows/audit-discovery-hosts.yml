@@ -29,6 +29,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
       - name: Audit authoritative SHIP and SLAP records
         env:
           AUDIT_ROUNDS: ${{ inputs.rounds }}

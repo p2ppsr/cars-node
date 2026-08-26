@@ -17,10 +17,20 @@ test('discovery denylist normalizes configured domains', () => {
   ])
 })
 
-test('default discovery denylist contains the retired Metanet provider', () => {
+test('default discovery denylist contains retired and repeatedly unavailable providers', () => {
   assert.ok(DEFAULT_DISCOVERY_DENYLIST.includes(
     'https://backend.463a5e81e29fe79f94d3381b7a42d6be.projects.metanet.club'
   ))
+  assert.ok(DEFAULT_DISCOVERY_DENYLIST.includes(
+    'https://backend.3ba03bd20ec0fae6602b1574c1446678.apps.beta.calhouncars.com'
+  ))
+  assert.ok(DEFAULT_DISCOVERY_DENYLIST.includes(
+    'https://backend.841c25be1e7c197d1a502676725ea2d2.cars.metanet.club'
+  ))
+  assert.ok(DEFAULT_DISCOVERY_DENYLIST.includes(
+    'https://backend.2f1a64dd7f952437e06a5053ccc5a9e4.projects.babbage.systems'
+  ))
+  assert.equal(DEFAULT_DISCOVERY_DENYLIST.length, new Set(DEFAULT_DISCOVERY_DENYLIST).size)
 })
 
 test('discovery storage rejects denied domains and prefers the controller identity', async () => {
