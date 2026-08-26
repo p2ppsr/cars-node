@@ -31,9 +31,19 @@ test('generated project backends are thin advertisement consumers', () => {
 
   assert.match(generated, /crypto\.randomBytes\(32\)/)
   assert.match(generated, /advertiser: passiveAdvertiser/)
-  assert.match(generated, /server\.configureEngine\(false\)/)
+  assert.match(generated, /server\.configureEngine\(publicDiscoveryRoot\)/)
+  assert.match(generated, /process\.env\.CARS_PUBLIC_DISCOVERY_ROOT === 'true'/)
   assert.doesNotMatch(generated, /process\.env\.SERVER_PRIVATE_KEY/)
-  assert.equal(packageJson.dependencies['@bsv/sdk'], '2.4.0')
+  assert.equal(packageJson.dependencies['@bsv/sdk'], '2.4.1')
+})
+
+test('only configured compatibility hosts become public discovery roots', () => {
+  const { isPublicDiscoveryRoot } = require('../dist/src/public-discovery-root.js')
+
+  assert.equal(isPublicDiscoveryRoot('users.bapp.dev', undefined), true)
+  assert.equal(isPublicDiscoveryRoot('https://users.bapp.dev/'), true)
+  assert.equal(isPublicDiscoveryRoot('example.com', undefined), false)
+  assert.equal(isPublicDiscoveryRoot('root.example', 'root.example,other.example'), true)
 })
 
 test('generated platform TLS renews independently from custom domains', () => {
@@ -117,6 +127,10 @@ test('control-plane image and deploy path pin and verify the production supply c
     path.join(__dirname, '..', 'scripts', 'k8s', 'deploy-local.sh'),
     'utf8'
   )
+  const publicRootScript = fs.readFileSync(
+    path.join(__dirname, '..', 'scripts', 'k8s', 'reconcile-users-public-discovery-root.sh'),
+    'utf8'
+  )
 
   assert.match(dockerfile, /buildah\/stable:v1\.43\.2@sha256:[0-9a-f]{64}/)
   assert.match(dockerfile, /ARG NODE_VERSION=24\.19\.0/)
@@ -139,9 +153,15 @@ test('control-plane image and deploy path pin and verify the production supply c
   assert.match(workflow, /required: true/)
   assert.match(workflow, /git merge-base --is-ancestor/)
   assert.match(deployScript, /deployment\/cars --timeout=15m[\s\S]+deployment\/cars-advertisement-controller --timeout=15m/)
+  assert.match(deployScript, /reconcile-users-public-discovery-root\.sh enable/)
   assert.match(deployScript, /rollout lost node diversity/)
   assert.match(deployScript, /metadata\.deletionTimestamp.*spec\.containers\[0\]\.image.*status\.containerStatuses\[0\]\.ready/)
   assert.doesNotMatch(deployScript, /node -[ep]/)
+  assert.match(publicRootScript, /cars-project-c6a84fc53bb50c34e179dcd861eb3964/)
+  assert.match(publicRootScript, /tm_users[\s\S]+tm_ship[\s\S]+tm_slap/)
+  assert.match(publicRootScript, /ls_users[\s\S]+ls_ship[\s\S]+ls_slap/)
+  assert.match(publicRootScript, /tm_kvstore/)
+  assert.match(publicRootScript, /ls_kvstore/)
   assert.doesNotMatch(
     fs.readFileSync(path.join(__dirname, '..', 'scripts', 'k8s', 'build-local-image.sh'), 'utf8'),
     /node -[ep]/
