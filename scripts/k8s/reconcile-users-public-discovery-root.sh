@@ -150,7 +150,7 @@ async function lookup(service, query) {
 })().catch(error => { console.error(error); process.exit(1); });
 NODE
 
-  "${kubectl_cmd}" -n cars-operator-system exec deployment/cars -c cars -- node <<'NODE'
+  "${kubectl_cmd}" -n cars-operator-system exec -i deployment/cars -c cars -- node <<'NODE'
 const {
   HTTPSOverlayLookupFacilitator,
   PushDrop,
