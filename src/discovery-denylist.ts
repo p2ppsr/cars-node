@@ -102,6 +102,36 @@ export const DEFAULT_DISCOVERY_DENYLIST = [
   'https://type-stamp-overlay-production.up.railway.app',
 ] as const;
 
+export type DiscoveryAdvertisementProtocol = 'SHIP' | 'SLAP';
+
+export interface DiscoveryCapabilityDenyRule {
+  protocol: DiscoveryAdvertisementProtocol;
+  domain: string;
+  capability: string;
+}
+
+// These active CARS projects still serve their application capabilities, but
+// no longer serve discovery itself. Deny only their obsolete discovery claims.
+const THIN_CARS_DISCOVERY_DOMAINS = [
+  'https://backend.161a4f0f091010a0f8a34a5d1d1b9dd7.projects.babbage.systems',
+  'https://backend.2efa4b8fe4c2bd42083636871b007e9e.projects.babbage.systems',
+  'https://backend.50247d539b678476a0b00db7bd5584e8.projects.babbage.systems',
+  'https://backend.59d6f2d7e6314d0b188e11df0f516478.projects.babbage.systems',
+  'https://backend.6a33ab530105ffdc39886db56229fa45.projects.babbage.systems',
+  'https://backend.c7350da1b9bf4738a4fa7646eef8285f.projects.babbage.systems',
+  'https://backend.e3703603a3fe9f2dde54a73a7d7f1612.projects.babbage.systems',
+  'https://backend.e40be69a5b6200a8f2b23758f2174093.projects.babbage.systems',
+  'https://backend.f8ad4f88d28eff5fd4ab1411e2520a31.projects.babbage.systems',
+] as const;
+
+export const DEFAULT_DISCOVERY_CAPABILITY_DENYLIST: readonly DiscoveryCapabilityDenyRule[] =
+  THIN_CARS_DISCOVERY_DOMAINS.flatMap(domain => [
+    { protocol: 'SHIP', domain, capability: 'tm_ship' },
+    { protocol: 'SHIP', domain, capability: 'tm_slap' },
+    { protocol: 'SLAP', domain, capability: 'ls_ship' },
+    { protocol: 'SLAP', domain, capability: 'ls_slap' },
+  ] as const);
+
 export function normalizeDiscoveryDomain(value: string): string {
   return String(value || '').trim().replace(/\/+$/, '').toLowerCase();
 }
@@ -109,6 +139,51 @@ export function normalizeDiscoveryDomain(value: string): string {
 export function discoveryDenylist(value = process.env.CARS_BANNED_AD_DOMAINS): Set<string> {
   const configured = value === undefined ? DEFAULT_DISCOVERY_DENYLIST.join(',') : value;
   return new Set(configured.split(',').map(normalizeDiscoveryDomain).filter(Boolean));
+}
+
+export function discoveryCapabilityKey(
+  protocol: DiscoveryAdvertisementProtocol,
+  domain: string,
+  capability: string,
+): string {
+  return `${protocol}|${normalizeDiscoveryDomain(domain)}|${String(capability || '').trim()}`;
+}
+
+export function serializeDiscoveryCapabilityDenylist(
+  rules: readonly DiscoveryCapabilityDenyRule[] = DEFAULT_DISCOVERY_CAPABILITY_DENYLIST,
+): string {
+  return rules.map(rule => discoveryCapabilityKey(
+    rule.protocol,
+    rule.domain,
+    rule.capability,
+  )).join(',');
+}
+
+export function discoveryCapabilityDenylist(
+  value = process.env.CARS_BANNED_AD_CAPABILITIES,
+): Set<string> {
+  const configured = value === undefined ? serializeDiscoveryCapabilityDenylist() : value;
+  const denied = new Set<string>();
+  for (const entry of configured.split(',')) {
+    const [protocol, domain, ...capabilityParts] = entry.split('|');
+    const capability = capabilityParts.join('|').trim();
+    if ((protocol !== 'SHIP' && protocol !== 'SLAP') || !domain || !capability) continue;
+    denied.add(discoveryCapabilityKey(protocol, domain, capability));
+  }
+  return denied;
+}
+
+export function isDiscoveryCapabilityDenied(
+  deniedDomains: ReadonlySet<string>,
+  deniedCapabilities: ReadonlySet<string>,
+  protocol: DiscoveryAdvertisementProtocol,
+  domain: string,
+  capability: string,
+): boolean {
+  const normalizedDomain = normalizeDiscoveryDomain(domain);
+  return deniedDomains.has(normalizedDomain) || deniedCapabilities.has(
+    discoveryCapabilityKey(protocol, normalizedDomain, capability),
+  );
 }
 
 /**
@@ -119,9 +194,11 @@ export function discoveryDenylist(value = process.env.CARS_BANNED_AD_DOMAINS): S
 export function installDiscoveryDenylist(
   value = process.env.CARS_BANNED_AD_DOMAINS,
   preferredIdentityKey?: string,
+  capabilityValue = process.env.CARS_BANNED_AD_CAPABILITIES,
 ): Set<string> {
   const deniedDomains = discoveryDenylist(value);
-  if (deniedDomains.size === 0) return deniedDomains;
+  const deniedCapabilities = discoveryCapabilityDenylist(capabilityValue);
+  if (deniedDomains.size === 0 && deniedCapabilities.size === 0) return deniedDomains;
 
   const EnginePrototype = Engine.prototype as any;
   if (!EnginePrototype.__carsDiscoveryDenylistPatched) {
@@ -135,11 +212,18 @@ export function installDiscoveryDenylist(
           for (const output of transaction.outputs) {
             try {
               const decoded = PushDrop.decode(output.lockingScript);
-              if (decoded.fields.length < 3) continue;
+              if (decoded.fields.length < 4) continue;
               const protocol = Utils.toUTF8(decoded.fields[0]);
               if (protocol !== 'SHIP' && protocol !== 'SLAP') continue;
               const domain = normalizeDiscoveryDomain(Utils.toUTF8(decoded.fields[2]));
-              if (deniedDomains.has(domain)) {
+              const capability = Utils.toUTF8(decoded.fields[3]);
+              if (isDiscoveryCapabilityDenied(
+                deniedDomains,
+                deniedCapabilities,
+                protocol,
+                domain,
+                capability,
+              )) {
                 blockedTopics.add(protocol === 'SHIP' ? 'tm_ship' : 'tm_slap');
               }
             } catch {
@@ -191,7 +275,13 @@ export function installDiscoveryDenylist(
       advertisedName: string,
     ) {
       const normalizedDomain = normalizeDiscoveryDomain(domain);
-      if (deniedDomains.has(normalizedDomain)) {
+      if (isDiscoveryCapabilityDenied(
+        deniedDomains,
+        deniedCapabilities,
+        protocol,
+        normalizedDomain,
+        advertisedName,
+      )) {
         logger.info({ protocol, txid, outputIndex, domain: normalizedDomain, advertisedName },
           'Rejected denied SHIP/SLAP discovery record');
         return;
@@ -225,6 +315,9 @@ export function installDiscoveryDenylist(
 
   patchStorage(SHIPStorage, 'storeSHIPRecord', 'SHIP');
   patchStorage(SLAPStorage, 'storeSLAPRecord', 'SLAP');
-  logger.info({ deniedDomains: [...deniedDomains].sort() }, 'Installed SHIP/SLAP discovery denylist');
+  logger.info({
+    deniedDomains: [...deniedDomains].sort(),
+    deniedCapabilities: [...deniedCapabilities].sort(),
+  }, 'Installed SHIP/SLAP discovery denylist');
   return deniedDomains;
 }

@@ -26,6 +26,10 @@ denied_domains="$(${kubectl_cmd} -n cars-operator-system exec deployment/cars -c
 const { DEFAULT_DISCOVERY_DENYLIST } = require("./dist/src/discovery-denylist.js");
 process.stdout.write(DEFAULT_DISCOVERY_DENYLIST.join(","));
 ')"
+denied_capabilities="$(${kubectl_cmd} -n cars-operator-system exec deployment/cars -c cars -- node -e '
+const { serializeDiscoveryCapabilityDenylist } = require("./dist/src/discovery-denylist.js");
+process.stdout.write(serializeDiscoveryCapabilityDenylist());
+')"
 preferred_identity_key="$(${kubectl_cmd} -n cars-operator-system exec deployment/cars-advertisement-controller -c controller -- node -e '
 const { KeyDeriver, PrivateKey } = require("@bsv/sdk");
 process.stdout.write(new KeyDeriver(new PrivateKey(process.env.CARS_ADVERTISEMENT_PRIVATE_KEY, "hex")).identityKey);
@@ -72,6 +76,7 @@ fi
 "${kubectl_cmd}" -n "${namespace}" set env "deployment/${deployment}" -c backend \
   "CARS_PUBLIC_DISCOVERY_ROOT=${root_enabled}" \
   "CARS_BANNED_AD_DOMAINS=${denied_domains}" \
+  "CARS_BANNED_AD_CAPABILITIES=${denied_capabilities}" \
   "CARS_DISCOVERY_PREFERRED_IDENTITY_KEY=${preferred_identity_key}"
 "${kubectl_cmd}" -n "${namespace}" annotate "deployment/${deployment}" \
   "network-ops.babbage.systems/public-discovery-root=${root_enabled}" \
@@ -106,7 +111,7 @@ Promise.all([
 }).catch(error => { console.error(error); process.exit(1); });
 '
 
-if [[ "${mode}" == "enable" ]]; then
+if [[ "${mode}" == "enable" && "${CARS_DISCOVERY_SKIP_PUBLIC_POSTFLIGHT:-false}" != "true" ]]; then
   node <<'NODE'
 const base = 'https://users.bapp.dev';
 async function get(path) {
@@ -144,7 +149,59 @@ async function lookup(service, query) {
   console.log(JSON.stringify({ publicRoot: base, shipOutputs, slapOutputs }));
 })().catch(error => { console.error(error); process.exit(1); });
 NODE
-else
+
+  "${kubectl_cmd}" -n cars-operator-system exec deployment/cars -c cars -- node <<'NODE'
+const {
+  HTTPSOverlayLookupFacilitator,
+  PushDrop,
+  Transaction,
+  Utils,
+} = require('@bsv/sdk');
+const {
+  discoveryCapabilityDenylist,
+  discoveryDenylist,
+  isDiscoveryCapabilityDenied,
+} = require('./dist/src/discovery-denylist.js');
+
+(async () => {
+  const facilitator = new HTTPSOverlayLookupFacilitator();
+  const checks = [
+    ['ls_ship', { topics: ['tm_kvstore'] }],
+    ['ls_slap', { service: 'ls_kvstore' }],
+    ['ls_slap', { service: 'ls_ship' }],
+    ['ls_slap', { service: 'ls_slap' }],
+  ];
+  const deniedDomains = discoveryDenylist();
+  const deniedCapabilities = discoveryCapabilityDenylist();
+  const results = {};
+  for (const [service, query] of checks) {
+    const answer = await facilitator.lookup('https://users.bapp.dev', { service, query }, 15_000);
+    if (answer.type !== 'output-list') throw new Error(`${service}: expected an output list`);
+    const key = `${service}:${JSON.stringify(query)}`;
+    results[key] = answer.outputs.length;
+    if ((service === 'ls_ship' || query.service === 'ls_kvstore') && answer.outputs.length !== 1) {
+      throw new Error(`${key}: expected exactly one aggregated provider, received ${answer.outputs.length}`);
+    }
+    if (answer.outputs.length === 0) throw new Error(`${key}: expected at least one aggregated provider`);
+    const protocol = service === 'ls_ship' ? 'SHIP' : 'SLAP';
+    for (const output of answer.outputs) {
+      const transaction = Transaction.fromBEEF(output.beef);
+      const decoded = PushDrop.decode(transaction.outputs[output.outputIndex].lockingScript);
+      const domain = Utils.toUTF8(decoded.fields[2]);
+      const capability = Utils.toUTF8(decoded.fields[3]);
+      if (isDiscoveryCapabilityDenied(
+        deniedDomains,
+        deniedCapabilities,
+        protocol,
+        domain,
+        capability,
+      )) throw new Error(`${key}: aggregated response contains denied ${protocol} ${domain} ${capability}`);
+    }
+  }
+  console.log(JSON.stringify({ publicRoot: 'https://users.bapp.dev', aggregation: results }));
+})().catch(error => { console.error(error); process.exit(1); });
+NODE
+elif [[ "${mode}" == "disable" ]]; then
   curl --fail --show-error --silent https://users.bapp.dev/health >/dev/null
 fi
 
