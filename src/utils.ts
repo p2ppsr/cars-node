@@ -329,11 +329,29 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
       .map(normalizeDeniedDomain)
       .filter(Boolean)
   );
+  const discoveryCapabilityKey = (protocol, domain, capability) =>
+    protocol + '|' + normalizeDeniedDomain(domain) + '|' + String(capability || '').trim();
+  const deniedDiscoveryCapabilities = new Set(
+    String(process.env.CARS_BANNED_AD_CAPABILITIES || '')
+      .split(',')
+      .map(value => {
+        const parts = value.split('|');
+        if (parts.length < 3 || (parts[0] !== 'SHIP' && parts[0] !== 'SLAP')) return '';
+        return discoveryCapabilityKey(parts[0], parts[1], parts.slice(2).join('|'));
+      })
+      .filter(Boolean)
+  );
+  const isDeniedDiscoveryCapability = (protocol, domain, capability) => {
+    const normalizedDomain = normalizeDeniedDomain(domain);
+    return deniedDiscoveryDomains.has(normalizedDomain) || deniedDiscoveryCapabilities.has(
+      discoveryCapabilityKey(protocol, normalizedDomain, capability)
+    );
+  };
   const preferredDiscoveryIdentityKey = String(
     process.env.CARS_DISCOVERY_PREFERRED_IDENTITY_KEY || ''
   ).trim();
 
-  if (deniedDiscoveryDomains.size > 0) {
+  if (deniedDiscoveryDomains.size > 0 || deniedDiscoveryCapabilities.size > 0) {
     try {
       const { Engine } = appRequire('@bsv/overlay');
       const { SHIPStorage, SLAPStorage } = appRequire('@bsv/overlay-discovery-services');
@@ -348,11 +366,12 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
               for (const output of transaction.outputs) {
                 try {
                   const decoded = PushDrop.decode(output.lockingScript);
-                  if (decoded.fields.length < 3) continue;
+                  if (decoded.fields.length < 4) continue;
                   const protocol = Utils.toUTF8(decoded.fields[0]);
                   if (protocol !== 'SHIP' && protocol !== 'SLAP') continue;
                   const domain = normalizeDeniedDomain(Utils.toUTF8(decoded.fields[2]));
-                  if (deniedDiscoveryDomains.has(domain)) {
+                  const capability = Utils.toUTF8(decoded.fields[3]);
+                  if (isDeniedDiscoveryCapability(protocol, domain, capability)) {
                     blockedTopics.add(protocol === 'SHIP' ? 'tm_ship' : 'tm_slap');
                   }
                 } catch {
@@ -396,7 +415,7 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
           txid, outputIndex, identityKey, domain, advertisedName
         ) {
           const normalizedDomain = normalizeDeniedDomain(domain);
-          if (deniedDiscoveryDomains.has(normalizedDomain)) {
+          if (isDeniedDiscoveryCapability(protocol, normalizedDomain, advertisedName)) {
             console.log('CARS_DISCOVERY_DENYLIST_STORAGE ' + JSON.stringify({
               protocol, txid, outputIndex, domain: normalizedDomain, advertisedName
             }));
@@ -430,7 +449,10 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
 
       patchDiscoveryStorage(SHIPStorage, 'storeSHIPRecord', 'SHIP');
       patchDiscoveryStorage(SLAPStorage, 'storeSLAPRecord', 'SLAP');
-      console.log('CARS_DISCOVERY_DENYLIST installed for ' + [...deniedDiscoveryDomains].sort().join(','));
+      console.log('CARS_DISCOVERY_DENYLIST installed for ' + JSON.stringify({
+        domains: [...deniedDiscoveryDomains].sort(),
+        capabilities: [...deniedDiscoveryCapabilities].sort()
+      }));
     } catch (error) {
       console.error('CARS_DISCOVERY_DENYLIST failed to install', error);
     }
@@ -609,7 +631,11 @@ if (process.env.SAFE_REQUEST_LOGGING === 'true') {
 
     const probeDiscoveryCapability = async (descriptor) => {
       const key = stableJson([descriptor.protocol, descriptor.domain, descriptor.capability]);
-      if (deniedDiscoveryDomains.has(normalizeDeniedDomain(descriptor.domain))) return false;
+      if (isDeniedDiscoveryCapability(
+        descriptor.protocol,
+        descriptor.domain,
+        descriptor.capability
+      )) return false;
       const now = Date.now();
       const cached = discoveryProbeCache.get(key);
       if (cached && cached.expiresAt > now) return cached.live;

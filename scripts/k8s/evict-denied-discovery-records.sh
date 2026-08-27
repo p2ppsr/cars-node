@@ -2,38 +2,81 @@
 set -euo pipefail
 
 kubectl_cmd="${KUBECTL:-kubectl}"
-namespace="cars-operator-system"
-selector="app.kubernetes.io/name=cars-advertisement-controller"
+controller_namespace="cars-operator-system"
+controller_selector="app.kubernetes.io/name=cars-advertisement-controller"
+root_namespace="cars-project-c6a84fc53bb50c34e179dcd861eb3964"
+root_selector="app=cars-project-c6a84fc53bb50c34e179dcd8"
 
-pod="$(${kubectl_cmd} -n "${namespace}" get pods -l "${selector}" \
-  -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\t"}{.status.containerStatuses[0].ready}{"\n"}{end}' \
-  | awk -F '\t' '$2 == "" && $3 == "true" {print $1; exit}')"
-[[ -n "${pod}" ]] || {
+ready_pod() {
+  local namespace="$1"
+  local selector="$2"
+  "${kubectl_cmd}" -n "${namespace}" get pods -l "${selector}" \
+    -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\t"}{.status.containerStatuses[0].ready}{"\n"}{end}' \
+    | awk -F '\t' '$2 == "" && $3 == "true" {print $1; exit}'
+}
+
+controller_pod="$(ready_pod "${controller_namespace}" "${controller_selector}")"
+root_pod="$(ready_pod "${root_namespace}" "${root_selector}")"
+[[ -n "${controller_pod}" ]] || {
   echo "no ready advertisement-controller pod is available for discovery eviction" >&2
   exit 1
 }
+[[ -n "${root_pod}" ]] || {
+  echo "no ready users.bapp.dev backend pod is available for discovery eviction" >&2
+  exit 1
+}
 
-"${kubectl_cmd}" -n "${namespace}" exec -i "${pod}" -c controller -- node <<'NODE'
+denied_domains="$(${kubectl_cmd} -n "${controller_namespace}" exec "${controller_pod}" -c controller -- node -e '
+const { DEFAULT_DISCOVERY_DENYLIST } = require("./dist/src/discovery-denylist.js");
+process.stdout.write(DEFAULT_DISCOVERY_DENYLIST.join(","));
+')"
+denied_capabilities="$(${kubectl_cmd} -n "${controller_namespace}" exec "${controller_pod}" -c controller -- node -e '
+const { serializeDiscoveryCapabilityDenylist } = require("./dist/src/discovery-denylist.js");
+process.stdout.write(serializeDiscoveryCapabilityDenylist());
+')"
+preferred_identity_key="$(${kubectl_cmd} -n "${controller_namespace}" exec "${controller_pod}" -c controller -- node -e '
+const { KeyDeriver, PrivateKey } = require("@bsv/sdk");
+process.stdout.write(new KeyDeriver(new PrivateKey(process.env.CARS_ADVERTISEMENT_PRIVATE_KEY, "hex")).identityKey);
+')"
+
+evict_store() {
+  local namespace="$1"
+  local pod="$2"
+  local container="$3"
+  local target="$4"
+  "${kubectl_cmd}" -n "${namespace}" exec -i "${pod}" -c "${container}" -- env \
+    "CARS_EVICTION_TARGET=${target}" \
+    "CARS_EVICTION_DENIED_DOMAINS=${denied_domains}" \
+    "CARS_EVICTION_DENIED_CAPABILITIES=${denied_capabilities}" \
+    "CARS_EVICTION_PREFERRED_IDENTITY_KEY=${preferred_identity_key}" \
+    node <<'NODE'
 const { MongoClient } = require('mongodb');
-const { KeyDeriver, PrivateKey } = require('@bsv/sdk');
-const {
-  DEFAULT_DISCOVERY_DENYLIST,
-  discoveryDenylist,
-  normalizeDiscoveryDomain,
-} = require('./dist/src/discovery-denylist.js');
+
+const normalizeDomain = value => String(value || '').trim().replace(/\/+$/, '').toLowerCase();
+const capabilityKey = (protocol, domain, capability) =>
+  `${protocol}|${normalizeDomain(domain)}|${String(capability || '').trim()}`;
 
 (async () => {
-  const mongoUrl = process.env.ADVERTISEMENT_MONGO_URL;
-  if (!mongoUrl) throw new Error('ADVERTISEMENT_MONGO_URL is required');
-  const denied = [...discoveryDenylist(
-    process.env.CARS_BANNED_AD_DOMAINS || DEFAULT_DISCOVERY_DENYLIST.join(',')
-  )];
-  if (denied.length === 0) throw new Error('refusing eviction with an empty discovery denylist');
-  const privateKey = process.env.CARS_ADVERTISEMENT_PRIVATE_KEY;
-  if (!privateKey) throw new Error('CARS_ADVERTISEMENT_PRIVATE_KEY is required');
-  const preferredIdentityKey = new KeyDeriver(new PrivateKey(privateKey, 'hex')).identityKey;
+  const target = process.env.CARS_EVICTION_TARGET;
+  const mongoUrl = process.env.ADVERTISEMENT_MONGO_URL || process.env.MONGO_URL;
+  if (!mongoUrl) throw new Error(`${target}: ADVERTISEMENT_MONGO_URL or MONGO_URL is required`);
+  const deniedDomains = new Set(
+    String(process.env.CARS_EVICTION_DENIED_DOMAINS || '').split(',').map(normalizeDomain).filter(Boolean)
+  );
+  const deniedCapabilities = new Set(
+    String(process.env.CARS_EVICTION_DENIED_CAPABILITIES || '').split(',').map(value => {
+      const [protocol, domain, ...capabilityParts] = value.split('|');
+      if ((protocol !== 'SHIP' && protocol !== 'SLAP') || !domain || capabilityParts.length === 0) return '';
+      return capabilityKey(protocol, domain, capabilityParts.join('|'));
+    }).filter(Boolean)
+  );
+  if (deniedDomains.size === 0) throw new Error(`${target}: refusing eviction with an empty domain denylist`);
+  if (deniedCapabilities.size === 0) {
+    throw new Error(`${target}: refusing eviction with an empty capability denylist`);
+  }
+  const preferredIdentityKey = process.env.CARS_EVICTION_PREFERRED_IDENTITY_KEY;
+  if (!preferredIdentityKey) throw new Error(`${target}: preferred identity key is required`);
 
-  const candidates = [...new Set(denied.flatMap(domain => [domain, `${domain}/`]))];
   const client = new MongoClient(mongoUrl);
   await client.connect();
   try {
@@ -46,25 +89,47 @@ const {
       ['slapRecords', 'SLAP', 'service'],
     ]) {
       const collection = database.collection(collectionName);
-      const records = await collection.find({ domain: { $in: candidates } }).toArray();
-      if (records.length > 0) {
-        await backup.insertMany(records.map(record => ({
+      const before = await collection.find({}).toArray();
+      const domainRecords = before.filter(record => deniedDomains.has(normalizeDomain(record.domain)));
+      const domainIds = new Set(domainRecords.map(record => String(record._id)));
+      const capabilityRecords = before.filter(record =>
+        !domainIds.has(String(record._id)) && deniedCapabilities.has(
+          capabilityKey(protocol, record.domain, record[capabilityField])
+        )
+      );
+      const evictions = [
+        ...domainRecords.map(record => ({ reason: 'operator-domain-denylist', record })),
+        ...capabilityRecords.map(record => ({ reason: 'operator-capability-denylist', record })),
+      ];
+      if (evictions.length > 0) {
+        await backup.insertMany(evictions.map(({ reason, record }) => ({
           evictedAt,
-          reason: 'operator-domain-denylist',
+          reason,
+          target,
           protocol,
           sourceCollection: collectionName,
           record,
         })));
-        await collection.deleteMany({ _id: { $in: records.map(record => record._id) } });
+        await collection.deleteMany({ _id: { $in: evictions.map(({ record }) => record._id) } });
       }
-      const remaining = await collection.countDocuments({ domain: { $in: candidates } });
-      if (remaining !== 0) throw new Error(`${collectionName} retains ${remaining} denied records`);
 
       const activeRecords = await collection.find({}).toArray();
+      const deniedRemaining = activeRecords.filter(record =>
+        deniedDomains.has(normalizeDomain(record.domain))
+      ).length;
+      const capabilityDeniedRemaining = activeRecords.filter(record =>
+        deniedCapabilities.has(capabilityKey(protocol, record.domain, record[capabilityField]))
+      ).length;
+      if (deniedRemaining !== 0 || capabilityDeniedRemaining !== 0) {
+        throw new Error(
+          `${target}/${collectionName} retains domain=${deniedRemaining} capability=${capabilityDeniedRemaining} denied records`
+        );
+      }
+
       const groups = new Map();
       for (const record of activeRecords) {
         const key = JSON.stringify([
-          normalizeDiscoveryDomain(record.domain),
+          normalizeDomain(record.domain),
           String(record[capabilityField] || ''),
         ]);
         const group = groups.get(key) || [];
@@ -88,6 +153,7 @@ const {
         await backup.insertMany(duplicateRecords.map(record => ({
           evictedAt,
           reason: 'semantic-provider-capability-duplicate',
+          target,
           protocol,
           sourceCollection: collectionName,
           record,
@@ -99,21 +165,32 @@ const {
       const validationKeys = new Set();
       for (const record of validationRecords) {
         const key = JSON.stringify([
-          normalizeDiscoveryDomain(record.domain),
+          normalizeDomain(record.domain),
           String(record[capabilityField] || ''),
         ]);
-        if (validationKeys.has(key)) throw new Error(`${collectionName} retains semantic duplicates`);
+        if (validationKeys.has(key)) throw new Error(`${target}/${collectionName} retains semantic duplicates`);
         validationKeys.add(key);
       }
       results[collectionName] = {
-        deniedEvicted: records.length,
+        domainDeniedEvicted: domainRecords.length,
+        capabilityDeniedEvicted: capabilityRecords.length,
         duplicatesEvicted: duplicateRecords.length,
-        deniedRemaining: remaining,
+        deniedRemaining,
+        capabilityDeniedRemaining,
       };
     }
-    console.log(JSON.stringify({ deniedDomains: denied.length, ...results }));
+    console.log(JSON.stringify({
+      target,
+      deniedDomains: deniedDomains.size,
+      deniedCapabilities: deniedCapabilities.size,
+      ...results,
+    }));
   } finally {
     await client.close();
   }
 })().catch(error => { console.error(error); process.exit(1); });
 NODE
+}
+
+evict_store "${controller_namespace}" "${controller_pod}" controller advertisement-controller
+evict_store "${root_namespace}" "${root_pod}" backend users.bapp.dev

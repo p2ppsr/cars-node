@@ -157,7 +157,10 @@ test('control-plane image and deploy path pin and verify the production supply c
   assert.match(workflow, /required: true/)
   assert.match(workflow, /git merge-base --is-ancestor/)
   assert.match(deployScript, /deployment\/cars --timeout=15m[\s\S]+deployment\/cars-advertisement-controller --timeout=15m/)
-  assert.match(deployScript, /reconcile-users-public-discovery-root\.sh enable/)
+  assert.match(
+    deployScript,
+    /CARS_DISCOVERY_SKIP_PUBLIC_POSTFLIGHT=true[\s\S]+reconcile-users-public-discovery-root\.sh enable[\s\S]+evict-denied-discovery-records\.sh[\s\S]+reconcile-users-public-discovery-root\.sh enable/
+  )
   assert.match(deployScript, /rollout lost node diversity/)
   assert.match(deployScript, /metadata\.deletionTimestamp.*spec\.containers\[0\]\.image.*status\.containerStatuses\[0\]\.ready/)
   assert.doesNotMatch(deployScript, /node -[ep]/)
@@ -168,7 +171,11 @@ test('control-plane image and deploy path pin and verify the production supply c
   assert.match(publicRootScript, /ls_kvstore/)
   assert.match(publicRootScript, /filterDiscoveryLookupPayload/)
   assert.match(publicRootScript, /expected one live, deduplicated KVStore provider/)
+  assert.match(publicRootScript, /HTTPSOverlayLookupFacilitator/)
+  assert.match(publicRootScript, /CARS_BANNED_AD_CAPABILITIES/)
   assert.match(evictionScript, /networkOpsDiscoveryEvictions/)
+  assert.match(evictionScript, /operator-capability-denylist/)
+  assert.match(evictionScript, /users\.bapp\.dev/)
   assert.match(evictionScript, /semantic-provider-capability-duplicate/)
   assert.match(deployScript, /evict-denied-discovery-records\.sh/)
   assert.doesNotMatch(
@@ -205,6 +212,8 @@ test('legacy index shim disables local discovery services and advertisement writ
   assert.match(requestLogger, /probeDiscoveryCapability/)
   assert.match(requestLogger, /X-CARS-Discovery-Filtered/)
   assert.match(requestLogger, /CARS_DISCOVERY_DENYLIST_STORAGE/)
+  assert.match(requestLogger, /CARS_BANNED_AD_CAPABILITIES/)
+  assert.match(requestLogger, /isDeniedDiscoveryCapability/)
   assert.match(requestLogger, /Discovery probes require a public hostname/)
   assert.match(requestLogger, /isPublicProbeAddress/)
   assert.doesNotMatch(requestLogger, /overlay-express/)
