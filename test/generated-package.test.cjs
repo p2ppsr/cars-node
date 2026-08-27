@@ -172,6 +172,7 @@ test('control-plane image and deploy path pin and verify the production supply c
   assert.match(publicRootScript, /filterDiscoveryLookupPayload/)
   assert.match(publicRootScript, /expected one live, deduplicated KVStore provider/)
   assert.match(publicRootScript, /HTTPSOverlayLookupFacilitator/)
+  assert.match(publicRootScript, /exec -i deployment\/cars -c cars -- node/)
   assert.match(publicRootScript, /CARS_BANNED_AD_CAPABILITIES/)
   assert.match(evictionScript, /networkOpsDiscoveryEvictions/)
   assert.match(evictionScript, /operator-capability-denylist/)
