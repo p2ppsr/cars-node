@@ -9,6 +9,14 @@ export interface ProjectCapabilities {
   lookupServices: string[];
 }
 
+export interface CapabilityInspectionOptions {
+  attempts?: number;
+  delayMs?: number;
+  requestTimeoutMs?: number;
+  request?: (url: string, options: { timeout: number }) => Promise<{ data: Record<string, unknown> | null | undefined }>;
+  sleep?: (delayMs: number) => Promise<void>;
+}
+
 const DISCOVERY_TOPICS = new Set(['tm_ship', 'tm_slap']);
 const DISCOVERY_SERVICES = new Set(['ls_ship', 'ls_slap']);
 
@@ -22,12 +30,34 @@ export function applicationCapabilities(
   };
 }
 
-export async function inspectProjectCapabilities(baseUrl: string): Promise<ProjectCapabilities> {
-  const [topics, services] = await Promise.all([
-    axios.get(`${baseUrl}/listTopicManagers`, { timeout: 30_000 }),
-    axios.get(`${baseUrl}/listLookupServiceProviders`, { timeout: 30_000 }),
-  ]);
-  return applicationCapabilities(Object.keys(topics.data || {}), Object.keys(services.data || {}));
+export async function inspectProjectCapabilities(
+  baseUrl: string,
+  options: CapabilityInspectionOptions = {},
+): Promise<ProjectCapabilities> {
+  const attempts = Math.max(1, options.attempts ?? 24);
+  const delayMs = Math.max(0, options.delayMs ?? 2_500);
+  const requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? 5_000);
+  const request = options.request ?? ((url, requestOptions) => axios.get(url, requestOptions));
+  const sleep = options.sleep ?? (delay => new Promise(resolve => setTimeout(resolve, delay)));
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const [topics, services] = await Promise.all([
+        request(`${baseUrl}/listTopicManagers`, { timeout: requestTimeoutMs }),
+        request(`${baseUrl}/listLookupServiceProviders`, { timeout: requestTimeoutMs }),
+      ]);
+      return applicationCapabilities(
+        Object.keys(topics.data || {}),
+        Object.keys(services.data || {}),
+      );
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await sleep(delayMs);
+    }
+  }
+
+  throw lastError;
 }
 
 export async function replaceProjectCapabilities(
