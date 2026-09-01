@@ -103,3 +103,18 @@ test('deployment scratch paths are opaque and bound to both tenant identifiers',
     else process.env.CARS_BUILD_CONTROLLER_TOKEN = previous;
   }
 });
+
+test('runtime cluster tools are rebuilt from pinned modules with patched dependencies', () => {
+  const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'Dockerfile'), 'utf8');
+  const helmModule = fs.readFileSync(path.join(__dirname, '..', 'tools', 'helm', 'go.mod'), 'utf8');
+  const kubectlModule = fs.readFileSync(path.join(__dirname, '..', 'tools', 'kubectl', 'go.mod'), 'utf8');
+  assert.match(dockerfile, /GO_VERSION=1\.26\.6/);
+  assert.match(dockerfile, /go mod verify/);
+  assert.match(dockerfile, /v1\.34\.11\+cars\.1/);
+  assert.match(dockerfile, /v4\.2\.4\+cars-patched-go1\.26\.6/);
+  assert.doesNotMatch(dockerfile, /dl\.k8s\.io\/release|linux-amd64\/helm/);
+  assert.match(helmModule, /helm\.sh\/helm\/v4 v4\.2\.4/);
+  assert.match(helmModule, /golang\.org\/x\/crypto v0\.55\.0/);
+  assert.match(helmModule, /oras\.land\/oras-go\/v2 v2\.6\.2/);
+  assert.match(kubectlModule, /k8s\.io\/kubectl v0\.34\.11/);
+});

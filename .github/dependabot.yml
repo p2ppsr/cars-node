@@ -10,3 +10,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+  - package-ecosystem: gomod
+    directory: /tools/helm
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: gomod
+    directory: /tools/kubectl
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

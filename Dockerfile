@@ -1,6 +1,6 @@
 ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.2@sha256:836f1db7d8a21dc26d63f6c4ef930cde3f2a69f3e9f4cae9cc6751ec7b7a40dc
 
-FROM ${BUILDAH_IMAGE} AS tools
+FROM ${BUILDAH_IMAGE} AS node-tools
 
 RUN dnf upgrade -y --refresh && \
     dnf install -y ca-certificates curl gzip tar xz && \
@@ -18,25 +18,7 @@ RUN curl --fail --location --proto '=https' --tlsv1.2 \
     tar --extract --xz --file node.tar.xz --strip-components=1 --directory /usr/local && \
     rm node.tar.xz
 
-ARG KUBECTL_VERSION=1.34.11
-ARG KUBECTL_SHA256=8efbb9435132a190920eb65a47a8c1ecf755ad85ab57a600c9bedbab460bb7a8
-RUN curl --fail --location --proto '=https' --tlsv1.2 \
-      --output /usr/local/bin/kubectl \
-      "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
-    printf '%s  %s\n' "${KUBECTL_SHA256}" /usr/local/bin/kubectl | sha256sum --check --strict && \
-    chmod 0755 /usr/local/bin/kubectl
-
-ARG HELM_VERSION=4.2.4
-ARG HELM_SHA256=c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3
-RUN curl --fail --location --proto '=https' --tlsv1.2 \
-      --output helm.tar.gz \
-      "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" && \
-    printf '%s  %s\n' "${HELM_SHA256}" helm.tar.gz | sha256sum --check --strict && \
-    tar --extract --gzip --file helm.tar.gz && \
-    install -m 0755 linux-amd64/helm /usr/local/bin/helm && \
-    rm -rf helm.tar.gz linux-amd64
-
-FROM tools AS release-security
+FROM node-tools AS release-security
 
 WORKDIR /security
 COPY package.json package-lock.json ./
@@ -51,6 +33,48 @@ RUN test -n "${SECURITY_AUDIT_NONCE}" && \
 
 FROM scratch AS release-security-evidence
 COPY --from=release-security /security/release-sbom.cdx.json /release-sbom.cdx.json
+
+FROM node-tools AS tools
+
+ARG GO_VERSION=1.26.6
+ARG GO_SHA256=708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89
+RUN curl --fail --location --proto '=https' --tlsv1.2 \
+      --output go.tar.gz \
+      "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" && \
+    printf '%s  %s\n' "${GO_SHA256}" go.tar.gz | sha256sum --check --strict && \
+    tar --extract --gzip --file go.tar.gz --directory /usr/local && \
+    rm go.tar.gz
+
+ENV PATH="/usr/local/go/bin:${PATH}" \
+    GOTOOLCHAIN=local \
+    GOPROXY="https://proxy.golang.org,direct" \
+    GOSUMDB="sum.golang.org"
+
+WORKDIR /tmp/cars-runtime-tools
+COPY tools/helm ./helm
+COPY tools/kubectl ./kubectl
+
+ARG HELM_VERSION=v4.2.4
+ARG HELM_COMMIT=3900f434fd3ef2b84065dc04508df48f288dba00
+RUN cd helm && \
+    go mod download && \
+    go mod verify && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+      -trimpath -buildvcs=false \
+      -ldflags="-s -w -X helm.sh/helm/v4/internal/version.version=${HELM_VERSION} -X helm.sh/helm/v4/internal/version.metadata=cars-patched-go${GO_VERSION} -X helm.sh/helm/v4/internal/version.gitCommit=${HELM_COMMIT} -X helm.sh/helm/v4/internal/version.gitTreeState=clean" \
+      -o /usr/local/bin/helm .
+
+ARG KUBECTL_VERSION=v1.34.11
+ARG KUBECTL_COMMIT=3a634765b787dd069f7f714fa77d767cb7d43795
+RUN cd kubectl && \
+    go mod download && \
+    go mod verify && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+      -trimpath -buildvcs=false \
+      -ldflags="-s -w -X k8s.io/component-base/version.gitMajor=1 -X k8s.io/component-base/version.gitMinor=34 -X k8s.io/component-base/version.gitVersion=${KUBECTL_VERSION}+cars.1 -X k8s.io/component-base/version.gitCommit=${KUBECTL_COMMIT} -X k8s.io/component-base/version.gitTreeState=clean" \
+      -o /usr/local/bin/kubectl . && \
+    go clean -cache -modcache && \
+    rm -rf /usr/local/go /tmp/cars-runtime-tools
 
 FROM ${BUILDAH_IMAGE} AS build
 
@@ -99,8 +123,8 @@ RUN install -d -m 0755 /app/src/migrations && \
     test ! -e /usr/local/bin/npm && \
     test ! -d /usr/local/lib/node_modules/npm && \
     test "$(node --version)" = "v24.19.0" && \
-    test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11" && \
-    test "$(helm version --template '{{.Version}}')" = "v4.2.4" && \
+    test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11+cars.1" && \
+    test "$(helm version --template '{{.Version}}')" = "v4.2.4+cars-patched-go1.26.6" && \
     buildah --version | grep -F 'buildah version 1.43.2'
 
 ENV CARS_MIGRATIONS_DIR=/app/src/migrations
