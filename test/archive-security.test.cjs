@@ -7,7 +7,7 @@ const { createGzip } = require('node:zlib');
 const tar = require('tar-stream');
 const test = require('node:test');
 
-const { extractTarGz } = require('../dist/src/archive.js');
+const { extractTarGz, safeArchivePath } = require('../dist/src/archive.js');
 
 async function archive(entries) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cars-archive-test-'));
@@ -35,6 +35,21 @@ test('extracts regular deployment files inside the destination', async t => {
   });
   assert.equal(report.entries, 2);
   assert.equal(await fs.readFile(path.join(fixture.output, 'frontend/index.html'), 'utf8'), 'ok');
+});
+
+test('ignores only a harmless directory marker for the archive root', async t => {
+  const fixture = await archive([
+    { header: { name: './', type: 'directory' } },
+    { header: { name: './frontend/index.html', type: 'file' }, body: 'ok' },
+  ]);
+  t.after(() => fs.rm(fixture.dir, { recursive: true, force: true }));
+  const report = await extractTarGz(fixture.archivePath, fixture.output, {
+    maxEntries: 10,
+    maxExpandedBytes: 1024,
+  });
+  assert.equal(report.entries, 2);
+  assert.equal(await fs.readFile(path.join(fixture.output, 'frontend/index.html'), 'utf8'), 'ok');
+  assert.throws(() => safeArchivePath(fixture.output, './'), /unsafe/);
 });
 
 test('rejects traversal and link entries', async t => {
