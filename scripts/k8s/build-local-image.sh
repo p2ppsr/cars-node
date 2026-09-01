@@ -35,6 +35,7 @@ image_digest="$(sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\).*$/\1/p' <<<"${pu
   exit 1
 }
 immutable_pull_image="${pull_image}@${image_digest}"
+immutable_push_image="${push_image}@${image_digest}"
 
 cat > release-manifest.json <<EOF
 {
@@ -50,6 +51,7 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
     printf 'image_tag=%s\n' "${image_tag}"
     printf 'image=%s\n' "${immutable_pull_image}"
+    printf 'scan_image=%s\n' "${immutable_push_image}"
     printf 'image_digest=%s\n' "${image_digest}"
   } >> "${GITHUB_OUTPUT}"
 fi
