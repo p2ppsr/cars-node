@@ -30,21 +30,60 @@ test('bounds Kubernetes health without removing a serving replica', async (t) =>
   })
 
   const db = Object.assign(
-    () => ({ count: () => ({ first: async () => ({ count: 1 }) }) }),
+    () => ({
+      count: () => ({ first: async () => ({ count: 1 }) }),
+      select: async () => [{ project_uuid: '0123456789abcdef0123456789abcdef' }],
+    }),
     { raw: async () => [{ ok: 1 }] }
   )
   const startedAt = Date.now()
   const report = await collectSystemHealth(db, {
     mainnetWalletReady: true,
     testnetWalletReady: true,
-    migrationsComplete: true
+    migrationsComplete: true,
+    namespaceLifecycleCheck: async () => ({
+      status: 'ok',
+      expectedProjects: 1,
+      managedNamespaces: 1,
+      missingNamespaces: [],
+      orphanNamespaces: [],
+      invalidBindings: [],
+    })
   })
 
   assert.ok(Date.now() - startedAt < 1000)
-  assert.equal(report.status, 'degraded')
+  assert.equal(report.status, 'error')
   assert.equal(report.live, true)
-  assert.equal(report.ready, true)
+  assert.equal(report.ready, false)
   const kubernetes = report.checks.find((check) => check.name === 'kubernetes')
-  assert.equal(kubernetes.critical, false)
+  assert.equal(kubernetes.critical, true)
+  assert.equal(kubernetes.readinessCritical, true)
+  assert.equal(kubernetes.livenessCritical, false)
   assert.equal(kubernetes.status, 'error')
+})
+
+test('namespace drift blocks readiness without turning liveness into a restart loop', async () => {
+  const db = Object.assign(
+    () => ({
+      count: () => ({ first: async () => ({ count: 1 }) }),
+      select: async () => [{ project_uuid: '0123456789abcdef0123456789abcdef' }],
+    }),
+    { raw: async () => [{ ok: 1 }] }
+  )
+  const report = await collectSystemHealth(db, {
+    mainnetWalletReady: true,
+    testnetWalletReady: true,
+    migrationsComplete: true,
+    namespaceLifecycleCheck: async () => ({
+      status: 'error',
+      expectedProjects: 1,
+      managedNamespaces: 0,
+      missingNamespaces: ['cars-project-0123456789abcdef0123456789abcdef'],
+      orphanNamespaces: [],
+      invalidBindings: [],
+    })
+  })
+  assert.equal(report.status, 'error')
+  assert.equal(report.live, true)
+  assert.equal(report.ready, false)
 })

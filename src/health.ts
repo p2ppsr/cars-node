@@ -2,6 +2,7 @@ import { execFile, execSync } from 'child_process';
 import axios from 'axios';
 import type { Knex } from 'knex';
 import { getProjectDbMode, getSharedDbConfig } from './shared-db';
+import { auditProjectNamespaces } from './namespace-lifecycle';
 
 type HealthStatus = 'ok' | 'degraded' | 'error';
 
@@ -9,6 +10,8 @@ interface HealthCheckResult {
     name: string;
     status: HealthStatus;
     critical: boolean;
+    readinessCritical: boolean;
+    livenessCritical: boolean;
     message?: string;
     details?: any;
     durationMs: number;
@@ -17,6 +20,8 @@ interface HealthCheckResult {
 interface HealthCheckDefinition {
     name: string;
     critical?: boolean;
+    readinessCritical?: boolean;
+    livenessCritical?: boolean;
     handler: () => Promise<{ status?: HealthStatus; message?: string; details?: any } | void> | { status?: HealthStatus; message?: string; details?: any } | void;
 }
 
@@ -72,7 +77,9 @@ async function runHealthCheck(definition: HealthCheckDefinition): Promise<Health
         return {
             name: definition.name,
             status: result.status || 'ok',
-            critical: definition.critical !== false,
+            critical: definition.readinessCritical ?? definition.critical ?? true,
+            readinessCritical: definition.readinessCritical ?? definition.critical ?? true,
+            livenessCritical: definition.livenessCritical ?? definition.critical ?? true,
             message: result.message,
             details: result.details,
             durationMs: Date.now() - startedAt
@@ -81,7 +88,9 @@ async function runHealthCheck(definition: HealthCheckDefinition): Promise<Health
         return {
             name: definition.name,
             status: 'error',
-            critical: definition.critical !== false,
+            critical: definition.readinessCritical ?? definition.critical ?? true,
+            readinessCritical: definition.readinessCritical ?? definition.critical ?? true,
+            livenessCritical: definition.livenessCritical ?? definition.critical ?? true,
             message: error?.message || 'Unexpected health-check error',
             durationMs: Date.now() - startedAt
         };
@@ -89,7 +98,7 @@ async function runHealthCheck(definition: HealthCheckDefinition): Promise<Health
 }
 
 function summarizeHealth(checks: HealthCheckResult[]): HealthStatus {
-    if (checks.some(check => check.critical && check.status === 'error')) {
+    if (checks.some(check => check.readinessCritical && check.status === 'error')) {
         return 'error';
     }
     if (checks.some(check => check.status !== 'ok')) {
@@ -136,6 +145,7 @@ export async function collectSystemHealth(db: Knex, options: {
     teratestnetWalletConfigured?: boolean;
     teratestnetWalletReady?: boolean;
     migrationsComplete: boolean;
+    namespaceLifecycleCheck?: (projectIds: string[]) => Promise<any>;
 }) {
     const checks = await Promise.all([
         runHealthCheck({
@@ -147,7 +157,8 @@ export async function collectSystemHealth(db: Knex, options: {
         }),
         runHealthCheck({
             name: 'kubernetes',
-            critical: false,
+            readinessCritical: true,
+            livenessCritical: false,
             handler: async () => {
                 const namespace = await getCarsNamespace();
                 return {
@@ -193,14 +204,29 @@ export async function collectSystemHealth(db: Knex, options: {
                     }
                 };
             }
+        }),
+        runHealthCheck({
+            name: 'namespaceLifecycle',
+            readinessCritical: true,
+            livenessCritical: false,
+            handler: async () => {
+                const projectRows = await db('projects').select('project_uuid');
+                const projectIds = projectRows.map((row: any) => String(row.project_uuid));
+                const report = await (options.namespaceLifecycleCheck || auditProjectNamespaces)(projectIds);
+                return {
+                    status: report.status === 'ok' ? 'ok' : 'error',
+                    message: report.status === 'ok' ? undefined : 'CARS project namespace drift detected',
+                    details: report
+                };
+            }
         })
     ]);
 
     const status = summarizeHealth(checks);
     return {
         status,
-        live: status !== 'error',
-        ready: status !== 'error',
+        live: !checks.some(check => check.livenessCritical && check.status === 'error'),
+        ready: !checks.some(check => check.readinessCritical && check.status === 'error'),
         checks
     };
 }

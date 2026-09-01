@@ -66,6 +66,8 @@ function topUpAmountFromRequest(req: any) {
 
 async function main() {
     let migrationsComplete = false;
+    let healthCache: { expiresAt: number; report: any } | undefined;
+    let healthInFlight: Promise<any> | undefined;
 
     // Run migrations
     logger.info('Running database migrations...');
@@ -129,36 +131,36 @@ async function main() {
         next();
     });
 
-    app.get('/health/live', async (_req, res) => {
-        const report = await collectSystemHealth(db, {
+    const getSystemHealth = async () => {
+        if (healthCache && healthCache.expiresAt > Date.now()) return healthCache.report;
+        if (healthInFlight) return healthInFlight;
+        healthInFlight = collectSystemHealth(db, {
             mainnetWalletReady: true,
             testnetWalletReady: true,
             teratestnetWalletConfigured: TTN_PRIVATE_KEY != null,
             teratestnetWalletReady: ttnWallet != null,
             migrationsComplete
+        }).then(report => {
+            healthCache = { expiresAt: Date.now() + 15000, report };
+            return report;
+        }).finally(() => {
+            healthInFlight = undefined;
         });
+        return healthInFlight;
+    };
+
+    app.get('/health/live', async (_req, res) => {
+        const report = await getSystemHealth();
         res.status(report.live ? 200 : 503).json(report);
     });
 
     app.get('/health/ready', async (_req, res) => {
-        const report = await collectSystemHealth(db, {
-            mainnetWalletReady: true,
-            testnetWalletReady: true,
-            teratestnetWalletConfigured: TTN_PRIVATE_KEY != null,
-            teratestnetWalletReady: ttnWallet != null,
-            migrationsComplete
-        });
+        const report = await getSystemHealth();
         res.status(report.ready ? 200 : 503).json(report);
     });
 
     app.get('/health', async (_req, res) => {
-        const report = await collectSystemHealth(db, {
-            mainnetWalletReady: true,
-            testnetWalletReady: true,
-            teratestnetWalletConfigured: TTN_PRIVATE_KEY != null,
-            teratestnetWalletReady: ttnWallet != null,
-            migrationsComplete
-        });
+        const report = await getSystemHealth();
         res.status(report.ready ? 200 : 503).json(report);
     });
 

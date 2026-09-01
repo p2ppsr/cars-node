@@ -22,8 +22,17 @@ image="${registry_pull}/cars-node:${IMAGE_TAG}"
   exit 2
 }
 
-curl --fail --show-error --silent https://cars.babbage.systems/health/live >/dev/null
-curl --fail --show-error --silent https://cars.babbage.systems/health/ready >/dev/null
+check_cars_health() {
+  local endpoint="$1" expected_field="$2" payload
+  payload="$(curl --fail --show-error --silent "https://cars.babbage.systems${endpoint}")"
+  jq -e --arg field "${expected_field}" '.status == "ok" and .[$field] == true' <<<"${payload}" >/dev/null || {
+    echo "CARS ${expected_field} health is not ok" >&2
+    return 1
+  }
+}
+
+check_cars_health /health/live live
+check_cars_health /health/ready ready
 "${kubectl_cmd}" -n cars-operator-system get --raw "/api/v1/namespaces/cars-operator-system/services/http:cars-advertisement-controller:8081/proxy/health/ready" >/dev/null
 
 "${kubectl_cmd}" -n cars-operator-system set image deployment/cars "cars=${image}"
@@ -32,8 +41,8 @@ curl --fail --show-error --silent https://cars.babbage.systems/health/ready >/de
   "network-ops.babbage.systems/cars-node-image=${image}" \
   --overwrite
 "${kubectl_cmd}" -n cars-operator-system rollout status deployment/cars --timeout=15m
-curl --fail --show-error --silent https://cars.babbage.systems/health/live >/dev/null
-curl --fail --show-error --silent https://cars.babbage.systems/health/ready >/dev/null
+check_cars_health /health/live live
+check_cars_health /health/ready ready
 
 rendered_advertisement_manifest="$(sed \
   "s|image: registry.cars-operator-system.svc.cluster.local:5000/cars-node:latest|image: ${image}|" \
@@ -64,8 +73,8 @@ controller_node_count="$(awk 'NF {count++} END {print count+0}' <<<"${controller
   exit 1
 }
 
-curl --fail --show-error --silent https://cars.babbage.systems/health/live >/dev/null
-curl --fail --show-error --silent https://cars.babbage.systems/health/ready >/dev/null
+check_cars_health /health/live live
+check_cars_health /health/ready ready
 "${kubectl_cmd}" -n cars-operator-system get --raw "/api/v1/namespaces/cars-operator-system/services/http:cars-advertisement-controller:8081/proxy/health/ready" >/dev/null
 
 KUBECTL="${kubectl_cmd}" SOURCE_SHA="${SOURCE_SHA}" \
