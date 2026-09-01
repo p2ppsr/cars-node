@@ -5,6 +5,11 @@ on:
     branches: [master]
     paths:
       - Dockerfile
+      - src/**
+      - setup.ts
+      - tsconfig.json
+      - wait-for-services.sh
+      - scripts/k8s/**
       - package.json
       - package-lock.json
       - tools/**
