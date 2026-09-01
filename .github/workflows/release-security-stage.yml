@@ -7,6 +7,7 @@ on:
       - Dockerfile
       - package.json
       - package-lock.json
+      - tools/**
       - .github/workflows/deploy-production-local.yml
       - .github/workflows/release-security-stage.yml
 
@@ -29,3 +30,25 @@ jobs:
             --build-arg "SECURITY_AUDIT_NONCE=pr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --output type=tar,dest=- . | tar --extract --file=-
           jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' release-sbom.cdx.json >/dev/null
+
+  runtime:
+    name: Runtime image security
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Build production runtime image
+        run: |
+          docker build --platform linux/amd64 \
+            --build-arg "APP_COMMIT=${GITHUB_SHA}" \
+            --build-arg "APP_VERSION=1.4.0" \
+            --tag cars-runtime-security:${GITHUB_SHA} .
+      - name: Reject high or critical runtime vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: cars-runtime-security:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
