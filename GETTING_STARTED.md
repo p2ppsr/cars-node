@@ -225,7 +225,10 @@ npm install
 docker compose build
 ```
 
-> NOTE: It's important to run `docker compose build` before you create your `.env` file. This is because your `.env` contains `DOCKER_HOST=tcp://dind:2375`, which will cause your image builds to fail. If you ever need to run `docker compose build` again (for example, during an upgrade to a new CARS Node version) you would need to temporarily move your `.env` somewhere else first (e.g. `mv .env .env.xxx && docker compose build && mv .env.xxx .env`).
+The Compose topology is a loopback-bound development environment, not a
+production deployment. Production CARS installations must use the
+source-controlled RBAC, lifecycle controller, network policies, and release
+workflow described in the operator repository.
 
 ---
 
@@ -243,7 +246,7 @@ When prompted, provide the necessary details. Important environment values:
 - `CARS_NODE_SERVER_BASEURL=https://cars.example.com` (your domain)
 - `MYSQL_DATABASE=cars_db`
 - `MYSQL_USER=cars_user`
-- `MYSQL_PASSWORD=cars_pass` (generate one)
+- `MYSQL_PASSWORD=<at least 20 random characters>`
 - `MYSQL_ROOT_PASSWORD=rootpw` (generate one)
 - `MYSQL_DATABASE_URL=mysql://cars_user:<password>@shared-mysql-haproxy.cars-operator-system.svc.cluster.local:3306/cars_db` for shared production installs. The Docker Compose demo still points this at the local `mysql` service.
 - `CARS_PROJECT_DB_MODE=shared` for new deployments.
@@ -258,10 +261,10 @@ When prompted, provide the necessary details. Important environment values:
 - `TTN_ARCADE_URL`: TTN EF broadcaster; defaults to `https://arcade-v2-ttn-us-1.bsvblockchain.tech`.
 - `TTN_CHAINTRACKS_URL`: Optional dedicated go-chaintracks host; when empty, CARS uses `TTN_ARCADE_URL` with `TTN_CHAINTRACKS_API_PREFIX=/chaintracks/v2`.
 - `TAAL_API_KEY_MAIN` and `TAAL_API_KEY_TEST`: Obtain from TAAL (explained in next step).
-- `K3S_TOKEN=cars-token` (generate a random token)
+- `K3S_TOKEN=<at least 32 random characters>`
 - `KUBECONFIG_FILE_PATH=/kubeconfig/kubeconfig.yaml` (will be created by cluster)
-- `DOCKER_HOST=tcp://dind:2375` (as per docker-compose)
 - `DOCKER_REGISTRY=cars-registry:5000`
+- `CARS_BUILD_CONTROLLER_TOKEN` and `CARS_NAMESPACE_LIFECYCLE_TOKEN`: distinct random values of at least 32 characters.
 - `PROJECT_DEPLOYMENT_DNS_NAME=projects.example.com` (Your prrojects subdomain. Projects will be at `frontend.<id>.projects.example.com` and/or `backend.<id>.projects.example.com`.)
 - `PROMETHEUS_URL=https://prometheus.projects.example.com` (use `https://prometheus.<projects>`, your projects subdomain)
 - `SENDGRID_API_KEY` (obtain from SendGrid)
@@ -278,7 +281,7 @@ kubectl apply -f k8s/shared-databases.yaml
 
 Replace the `CHANGE_ME` values in the manifest first. It creates `shared-mysql` in `cars-operator-system` as a 3-pod Percona XtraDB Cluster with 2 HAProxy pods, 200Gi Longhorn volumes, and 7-day MySQL binary-log retention, plus `shared-mongo` as 2 data members and 1 arbiter with 100Gi Longhorn volumes for the data members.
 
-In shared mode, each project gets its own MySQL database, MongoDB database, and DB user/password, but no namespace-local PXC, HAProxy, MongoDB, arbiter, or DB PVCs. Existing lookup-service deployments may also need legacy overlay databases that are not selected by the `MONGO_URL` path; `SHARED_MONGO_ADDITIONAL_DATABASES` defaults to `CARS_lookup_services`, and the migration CLI copies those databases without renaming them. Set `CARS_PROJECT_DB_MODE=legacy-per-project` only if you need the older per-project database workload behavior.
+In shared mode, each project gets its own MySQL database, MongoDB database, and DB user/password, but no namespace-local PXC, HAProxy, MongoDB, arbiter, or DB PVCs. Existing lookup-service deployments may also need legacy overlay databases that are not selected by the `MONGO_URL` path; `SHARED_MONGO_ADDITIONAL_DATABASES` defaults to `CARS_lookup_services`, and the migration CLI copies those databases without renaming them. The legacy per-project database mode is no longer accepted because it embedded shared static administrative credentials.
 
 Existing projects can be inventoried and migrated procedurally:
 

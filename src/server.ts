@@ -1,4 +1,6 @@
+import 'express-async-errors';
 import express from 'express';
+import crypto from 'node:crypto';
 import db from './db';
 import logger from './logger';
 import { createAuthMiddleware } from '@bsv/auth-express-middleware';
@@ -8,23 +10,32 @@ import routes from './routes';
 import upload from './routes/upload';
 import publicRoute from './routes/public';
 import globalEviction from './routes/globalEviction';
-import { initCluster } from './init-cluster';
 import { startCronJobs } from './cron';
 import timeout from 'connect-timeout';
+import helmet from 'helmet';
+import { rateLimit } from 'express-rate-limit';
 import { makeWallet } from './utils/wallet';
 import { collectSystemHealth } from './health';
 import { KnexSessionManager } from '@bsv/wallet-toolbox';
 import type { ProjectWallets } from './utils/wallet';
 import { disableRequestTimeout } from './http-server';
+import { KnexPaymentReplayStore } from './payment-replay';
 
-const port = parseInt(process.env.CARS_NODE_PORT || '7777', 10);
+function positiveInteger(name: string, fallback: number, maximum: number): number {
+    const value = Number.parseInt(process.env[name] || String(fallback), 10);
+    if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+        throw new Error(`${name} must be an integer between 1 and ${maximum}`);
+    }
+    return value;
+}
+
+const port = positiveInteger('CARS_NODE_PORT', 7777, 65535);
 const uploadTimeout = process.env.CARS_UPLOAD_TIMEOUT || '6h';
 const jsonBodyLimit = process.env.CARS_JSON_BODY_LIMIT || '2mb';
-const maxPaymentChunkSats = parseInt(process.env.CARS_MAX_PAYMENT_CHUNK_SATS || '10000', 10);
+const maxPaymentChunkSats = positiveInteger('CARS_MAX_PAYMENT_CHUNK_SATS', 10000, 100_000_000);
 const MAINNET_PRIVATE_KEY = process.env.MAINNET_PRIVATE_KEY;
 const TESTNET_PRIVATE_KEY = process.env.TESTNET_PRIVATE_KEY;
 const TTN_PRIVATE_KEY = process.env.TTN_PRIVATE_KEY;
-const INIT_K3S = process.env.INIT_K3S;
 
 if (!MAINNET_PRIVATE_KEY || !TESTNET_PRIVATE_KEY) {
     throw new Error('Missing CARS node testnet or mainnet private keys on startup.');
@@ -32,9 +43,34 @@ if (!MAINNET_PRIVATE_KEY || !TESTNET_PRIVATE_KEY) {
 if (!process.env.TAAL_API_KEY_MAIN || !process.env.TAAL_API_KEY_TEST) {
     throw new Error('TAAL API keys not configured');
 }
+if (process.env.NODE_ENV === 'production' && !/^https:\/\//.test(process.env.CARS_NODE_SERVER_BASEURL || '')) {
+    throw new Error('CARS_NODE_SERVER_BASEURL must use HTTPS in production');
+}
 
 function haltOnTimedout(req, res, next) {
     if (!req.timedout) next()
+}
+
+function publicHealth(report: any) {
+    return {
+        status: report.status,
+        live: report.live,
+        ready: report.ready,
+        checks: (report.checks || []).map(check => ({
+            name: check.name,
+            status: check.status,
+            critical: check.critical,
+            readinessCritical: check.readinessCritical,
+            livenessCritical: check.livenessCritical,
+            durationMs: check.durationMs,
+        })),
+    };
+}
+
+function requestId(req: any): string {
+    const supplied = req.headers['x-request-id'];
+    if (typeof supplied === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(supplied)) return supplied;
+    return crypto.randomUUID();
 }
 
 function sanitizeForLog(value: any): any {
@@ -48,6 +84,12 @@ function sanitizeForLog(value: any): any {
             }
             return [key, sanitizeForLog(entry)];
         }));
+    }
+    if (typeof value === 'string') {
+        return value.replace(
+            /(\/api\/v1\/upload\/[a-f0-9]{32}\/)[a-f0-9]{64,512}/gi,
+            '$1[redacted]',
+        );
     }
     return value;
 }
@@ -68,6 +110,7 @@ async function main() {
     let migrationsComplete = false;
     let healthCache: { expiresAt: number; report: any } | undefined;
     let healthInFlight: Promise<any> | undefined;
+    let lastHealthAlert = { fingerprint: '', emittedAt: 0 };
 
     // Run migrations
     logger.info('Running database migrations...');
@@ -87,14 +130,53 @@ async function main() {
     };
     const authSessionManager = new KnexSessionManager(db);
 
-    if (INIT_K3S) {
-        await initCluster();
-    }
     startCronJobs(db, projectWallets);
 
     const app = express();
-    app.set('trust proxy', true);
+    app.disable('x-powered-by');
+    app.set('trust proxy', 1);
     const isUploadRequest = (req) => req.path.startsWith('/api/v1/upload/');
+    const configuredOrigins = new Set(
+        String(process.env.CARS_ALLOWED_ORIGINS || '')
+            .split(',')
+            .map(value => value.trim())
+            .filter(Boolean)
+    );
+
+    app.use(helmet({
+        contentSecurityPolicy: false,
+        crossOriginResourcePolicy: false,
+    }));
+    app.use((req, res, next) => {
+        const id = requestId(req);
+        (req as any).requestId = id;
+        res.setHeader('x-request-id', id);
+        res.setHeader('cache-control', 'no-store');
+        next();
+    });
+
+    const apiLimiter = rateLimit({
+        windowMs: 15 * 60 * 1000,
+        limit: 600,
+        standardHeaders: 'draft-8',
+        legacyHeaders: false,
+        message: { error: 'Too many CARS API requests', code: 'CARS_RATE_LIMITED' },
+    });
+    const uploadLimiter = rateLimit({
+        windowMs: 60 * 60 * 1000,
+        limit: 30,
+        standardHeaders: 'draft-8',
+        legacyHeaders: false,
+        message: { error: 'Too many deployment upload attempts', code: 'CARS_UPLOAD_RATE_LIMITED' },
+    });
+    const evictionLimiter = rateLimit({
+        windowMs: 15 * 60 * 1000,
+        limit: 10,
+        standardHeaders: 'draft-8',
+        legacyHeaders: false,
+        message: { error: 'Too many takedown requests', code: 'CARS_EVICTION_RATE_LIMITED' },
+    });
+    app.use('/api/v1', apiLimiter);
 
     app.use((req, res, next) => {
         if (isUploadRequest(req)) {
@@ -106,15 +188,20 @@ async function main() {
         if (isUploadRequest(req)) {
             return next();
         }
-        return bodyParser.raw({ type: 'application/octet-stream', limit: '1gb' })(req, res, next);
+        return bodyParser.raw({ type: 'application/octet-stream', limit: '2mb' })(req, res, next);
     });
 
     // CORS
     app.use((req, res, next) => {
-        res.header('Access-Control-Allow-Origin', '*')
-        res.header('Access-Control-Allow-Headers', '*')
-        res.header('Access-Control-Allow-Methods', '*')
-        res.header('Access-Control-Expose-Headers', '*')
+        const origin = req.header('origin');
+        if (origin && configuredOrigins.size > 0 && !configuredOrigins.has(origin)) {
+            return res.status(403).json({ error: 'Origin is not allowed' });
+        }
+        res.header('Access-Control-Allow-Origin', configuredOrigins.size > 0 && origin ? origin : '*')
+        res.header('Vary', 'Origin')
+        res.header('Access-Control-Allow-Headers', 'authorization, content-type, x-bsv-payment, x-request-id')
+        res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        res.header('Access-Control-Expose-Headers', 'x-request-id, x-bsv-payment')
         if (req.method === 'OPTIONS') {
             return res.sendStatus(200)
         }
@@ -142,6 +229,25 @@ async function main() {
             migrationsComplete
         }).then(report => {
             healthCache = { expiresAt: Date.now() + 15000, report };
+            const failedChecks = report.checks
+                .filter(check => check.status !== 'ok')
+                .map(check => ({ name: check.name, status: check.status, message: check.message }));
+            const fingerprint = JSON.stringify(failedChecks);
+            if (failedChecks.length > 0 && (
+                fingerprint !== lastHealthAlert.fingerprint || Date.now() - lastHealthAlert.emittedAt >= 5 * 60 * 1000
+            )) {
+                logger.error({
+                    status: report.status,
+                    ready: report.ready,
+                    live: report.live,
+                    failedChecks,
+                    alert: 'cars.health.degraded',
+                }, 'CARS health degraded');
+                lastHealthAlert = { fingerprint, emittedAt: Date.now() };
+            } else if (failedChecks.length === 0 && lastHealthAlert.fingerprint) {
+                logger.info({ alert: 'cars.health.recovered' }, 'CARS health recovered');
+                lastHealthAlert = { fingerprint: '', emittedAt: Date.now() };
+            }
             return report;
         }).finally(() => {
             healthInFlight = undefined;
@@ -151,36 +257,34 @@ async function main() {
 
     app.get('/health/live', async (_req, res) => {
         const report = await getSystemHealth();
-        res.status(report.live ? 200 : 503).json(report);
+        res.status(report.live ? 200 : 503).json(publicHealth(report));
     });
 
     app.get('/health/ready', async (_req, res) => {
         const report = await getSystemHealth();
-        res.status(report.ready ? 200 : 503).json(report);
+        res.status(report.ready ? 200 : 503).json(publicHealth(report));
     });
 
     app.get('/health', async (_req, res) => {
         const report = await getSystemHealth();
-        res.status(report.ready ? 200 : 503).json(report);
+        res.status(report.ready ? 200 : 503).json(publicHealth(report));
     });
 
     // Upload uses signed URLs, so is excluded from Authrite. Also, they are not logged for performance reasons (they are large).
-    app.post('/api/v1/upload/:deploymentId/:signature', timeout(uploadTimeout), haltOnTimedout, upload);
+    app.post('/api/v1/upload/:deploymentId/:signature', uploadLimiter, timeout(uploadTimeout), haltOnTimedout, upload);
 
     // Public queries are also not authenticated
     app.get('/api/v1/public', publicRoute)
 
     // Global outpoint eviction endpoint also not authenticated
-    app.post('/api/v1/evict-globally', globalEviction)
+    app.post('/api/v1/evict-globally', evictionLimiter, globalEviction)
 
     // Logging middleware
     app.use((req, res, next) => {
         const startTime = Date.now();
 
         // Log incoming request details
-        const requestId = (req.headers['x-request-id'] as string) || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-        (req as any).requestId = requestId;
-        res.setHeader('x-request-id', requestId);
+        const requestId = (req as any).requestId;
 
         logger.info({ requestId, method: req.method, url: req.url, remoteAddress: req.ip }, 'Incoming Request');
 
@@ -257,8 +361,12 @@ async function main() {
                         email: certs[0].decryptedFields!.email
                     })
                 }
-            } catch (e) {
-                console.error('Error associating certificate with user', e)
+            } catch (error: any) {
+                logger.error({
+                    identityKey,
+                    error: error?.message || 'Unknown certificate persistence failure',
+                    alert: 'cars.auth.certificate_persistence_failed',
+                }, 'Error associating certificate with user')
             }
         },
         // certificatesToRequest: {
@@ -272,12 +380,32 @@ async function main() {
     // Payment middleware charges capped top-up chunks only. Larger balance fills are split by the CLI.
     app.use(createPaymentMiddleware({
         wallet: mainnetWallet,
+        replayStore: new KnexPaymentReplayStore(db),
+        maxPaymentHeaderBytes: 64 * 1024,
+        logger,
         calculateRequestPrice: (req: any) => {
             return topUpAmountFromRequest(req);
         }
     }))
 
     app.use('/api/v1', routes);
+
+    app.use((error: any, req: any, res: any, _next: any) => {
+        logger.error({
+            requestId: req.requestId,
+            method: req.method,
+            path: req.path,
+            error: error?.message || 'Unhandled request error',
+            alert: 'cars.http.unhandled_error',
+        }, 'Unhandled CARS request error');
+        if (!res.headersSent) {
+            res.status(500).json({
+                error: 'Internal CARS error',
+                code: 'CARS_INTERNAL_ERROR',
+                requestId: req.requestId,
+            });
+        }
+    });
 
     const server = app.listen(port, () => {
         logger.info(`CARS Node listening on port ${port}`);
@@ -286,6 +414,6 @@ async function main() {
 }
 
 main().catch(err => {
-    logger.error(err, 'Error on startup');
+    logger.fatal({ error: err?.message || String(err), alert: 'cars.startup.failed' }, 'CARS failed to start');
     process.exit(1);
 });

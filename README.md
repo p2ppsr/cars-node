@@ -82,7 +82,7 @@ At a high level, CARS Node is an Express.js server that:
 
 - **BSV Project Structure:** Your deployed projects follow [a known structure (BRC-102)](https://github.com/bitcoin-sv/BRCs/blob/master/apps/0102.md) with `deployment-info.json`, a `backend/`, `frontend/`, and integrated sCrypt contracts (optional).
 - **[CARS CLI](https://github.com/bitcoin-sv/cars-cli) Installed Locally (for developer workflows):** Use it on your dev machine to upload built artifacts.
-- **Docker & Docker Registry:** Needed for building/pushing images. Use the integrated `registry` and `dind` in the local `docker-compose.yml`, or configure externally.
+- **OCI Registry:** Needed for project images. The development Compose file includes a loopback-only registry; production must use operator-managed storage and immutable digest references.
 - **Kubernetes Cluster and kubectl Access:** CARS Node expects access to a k3s or Kubernetes cluster. Again, you can use the pre-configured Rancher k3s in the Compose file, or configure your own for larger scale. The Dockerfile bundled with the code installs `kubectl`, or you can run CARS directly on machine(s) that already have it.
 - **Helm:** For deploying workloads as Helm releases. Again, present in the integrated `Dockerfile`, or you can install it yourself.
 - **MySQL Database:** Persistent storage of CARS Node state. New production installs should put `cars_db` on the shared MySQL cluster and set `MYSQL_DATABASE_URL` accordingly. The integrated Compose file still provides a local MySQL service for development.
@@ -99,7 +99,7 @@ CARS Node is configured via a `.env` file. Run:
 ```bash
 npm run setup
 ```
-This interactive script asks for all required environment variables, including `CARS_NODE_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE_URL`, `CARS_PROJECT_DB_MODE`, `SHARED_MYSQL_ADMIN_URL`, `SHARED_MONGO_ADMIN_URL`, `MAINNET_PRIVATE_KEY`, `TESTNET_PRIVATE_KEY`, optional `TTN_PRIVATE_KEY`, `TAAL_API_KEY_MAIN`, `TAAL_API_KEY_TEST`, the TTN Arcade/ChainTracks endpoints, `K3S_TOKEN`, `DOCKER_HOST`, `DOCKER_REGISTRY`, `PROJECT_DEPLOYMENT_DNS_NAME`, `SENDGRID_API_KEY`, and more.
+This interactive script asks for all required environment variables, including `CARS_NODE_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE_URL`, `CARS_PROJECT_DB_MODE`, `SHARED_MYSQL_ADMIN_URL`, `SHARED_MONGO_ADMIN_URL`, `MAINNET_PRIVATE_KEY`, `TESTNET_PRIVATE_KEY`, optional `TTN_PRIVATE_KEY`, `TAAL_API_KEY_MAIN`, `TAAL_API_KEY_TEST`, the TTN Arcade/ChainTracks endpoints, `K3S_TOKEN`, `DOCKER_REGISTRY`, `PROJECT_DEPLOYMENT_DNS_NAME`, `SENDGRID_API_KEY`, and more.
 
 ### TerraTestNet projects
 
@@ -138,11 +138,13 @@ SHARED_MONGO_ADDITIONAL_DATABASES=CARS_lookup_services
 
 `SHARED_MONGO_ADDITIONAL_DATABASES` covers legacy overlay lookup-service databases that are not selected by the `MONGO_URL` path. It defaults to `CARS_lookup_services`; the migration CLI copies those databases without renaming them and grants the per-project Mongo user access so existing lookup services keep working after cutover.
 
-`CARS_PROJECT_DB_MODE=legacy-per-project` remains available as an escape hatch for the previous per-project MySQL/PXC and MongoDB workload behavior.
+The insecure legacy per-project database mode has been retired. CARS accepts only
+`CARS_PROJECT_DB_MODE=shared`, where each project receives unique credentials
+and database-level isolation without namespace-local database administrators.
 
 ### Step 3: Running CARS Node (Small Scale with Docker Compose)
 
-For development or small-scale demos:
+For local development only:
 
 1. Ensure Docker and Docker Compose installed.
 2. Run `docker-compose up` from the provided `docker-compose.yml`.  
@@ -150,17 +152,21 @@ For development or small-scale demos:
    - `cars-mysql` (MySQL database)
    - `cars-k3s` (K3s Kubernetes server)
    - `cars-registry` (local Docker registry)
-   - `cars-dind` (Docker-in-Docker for building images)
+   - an isolated Buildah controller for project images
+   - a separate namespace-lifecycle controller
    - `cars-node` (The CARS Node itself)
 
-Once running, CARS Node listens on `CARS_NODE_PORT` (default: 7777). You can now deploy projects using the CARS CLI from your development machine.
+Once running, CARS Node listens on `CARS_NODE_PORT` (default: 7777). The Compose
+topology is not a production security boundary; it keeps its development ports
+on loopback and retains a privileged local k3s container.
 
 ### Step 4: Production Considerations
 
 For larger scale or production:
 
-- **External Kubernetes:** Point `KUBECONFIG_FILE_PATH` to a production kubeconfig.
-- **External Registry:** Use a secure Docker registry, configure `DOCKER_REGISTRY`.
+- **Kubernetes authorization:** Give the API service account only the documented platform-read and per-project runtime roles. Run namespace creation/deletion through the separate lifecycle identity and admission policy; never use a cluster-admin kubeconfig.
+- **Build isolation:** Run the Buildah controller as a tokenless, Kubernetes-token-free sidecar. The API container runs non-root with no Linux capabilities. Deploy only the digest returned by the registry push.
+- **Registry:** Restrict registry writes to the build path and consume immutable image digests.
 - **Custom Domains & SSL:** Ensure that `PROJECT_DEPLOYMENT_DNS_NAME` is a domain you control. CARS Node uses Let’s Encrypt via `cert-manager`.
 - **Prometheus & Observability:** Make sure your Prometheus endpoint is stable and reachable.
 - **High Availability:** Use the shared Percona PXC and MongoDB clusters for project databases, keep CARS metadata in `cars_db` on shared MySQL, run multiple CARS Node instances behind a load balancer, and ensure persistent volumes for registry and shared database clusters.
@@ -271,6 +277,10 @@ Integrate `cars build` and `cars release now` into CI pipelines. After pushing c
 - **Private Keys:** Keep `MAINNET_PRIVATE_KEY`, `TESTNET_PRIVATE_KEY`, and optional `TTN_PRIVATE_KEY` secure. These keys are used for blockchain operations and must use network-isolated wallet storage.
 - **Admin Access:** Only authenticated, registered identities can manage projects. Carefully control who can become a project admin.
 - **HTTPS and Domain Verification:** Let’s Encrypt automation ensures end-to-end encryption for public endpoints.
+- **RBAC separation:** CARS runtime, platform-read, and namespace-lifecycle permissions are separate contracts. Every project namespace receives one canonical RoleBinding and Pod Security labels; drift makes readiness fail.
+- **Artifact boundary:** Upload URLs expire and are single-use. CARS authenticates before reading the body, enforces compressed and expanded limits, rejects links and path traversal, and performs tenant builds outside the API container.
+- **Durable authorization state:** Payment transactions, takedown actions, custom-domain claims, and deployment lifecycle status are stored transactionally so replicas cannot silently replay or diverge.
+- **Continuous assurance:** Production builds run dependency audit, CodeQL, high/critical image scanning, and SBOM generation. Repository secret scanning, push protection, Dependabot alerts, automated security updates, and private vulnerability reporting are enabled.
 
 ---
 

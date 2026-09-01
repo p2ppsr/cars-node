@@ -23,6 +23,13 @@ spec:
         app.kubernetes.io/part-of: cars
     spec:
       serviceAccountName: cars-operator-node
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -51,15 +58,24 @@ spec:
             - pod-template-hash
       containers:
         - name: controller
-          image: registry.cars-operator-system.svc.cluster.local:5000/cars-node:latest
+          image: registry.cars-operator-system.svc.cluster.local:5000/cars-node:RELEASE_IMAGE_REQUIRED
           imagePullPolicy: IfNotPresent
           command: ["node", "dist/src/advertisement-controller.js"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
           envFrom:
             - secretRef:
                 name: cars-environment
             - secretRef:
                 name: cars-advertisement-controller
           env:
+            - name: HOME
+              value: /tmp/home
             - name: ADVERTISEMENT_NETWORK
               value: mainnet
             - name: ADVERTISEMENT_CONTROLLER_PORT
@@ -98,6 +114,13 @@ spec:
             limits:
               cpu: "1"
               memory: 4Gi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
 ---
 apiVersion: v1
 kind: Service

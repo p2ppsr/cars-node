@@ -1,6 +1,6 @@
 services:
   mysql:
-    image: mysql:8.0
+    image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
     container_name: cars-mysql
     environment:
       MYSQL_DATABASE: ${MYSQL_DATABASE}
@@ -8,7 +8,7 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
     ports:
-      - "3306:3306" # No need to open this up in production, only here for development.
+      - "127.0.0.1:3306:3306"
     volumes:
       - ./local-data/mysql_data:/var/lib/mysql
     healthcheck:
@@ -47,10 +47,12 @@ services:
       SHARED_MONGO_APP_HOSTS: ${SHARED_MONGO_APP_HOSTS:-shared-mongo-0.shared-mongo.cars-operator-system.svc.cluster.local:27017,shared-mongo-1.shared-mongo.cars-operator-system.svc.cluster.local:27017}
       SHARED_MONGO_REPLICA_SET: ${SHARED_MONGO_REPLICA_SET:-rs0}
       LOG_LEVEL: "info"
-      K3S_TOKEN: ${K3S_TOKEN}
       KUBECONFIG: ${KUBECONFIG_FILE_PATH}
-      DOCKER_HOST: ${DOCKER_HOST}
       DOCKER_REGISTRY: ${DOCKER_REGISTRY}
+      CARS_BUILD_CONTROLLER_URL: http://build-controller:7790
+      CARS_BUILD_CONTROLLER_TOKEN: ${CARS_BUILD_CONTROLLER_TOKEN}
+      CARS_NAMESPACE_LIFECYCLE_URL: http://namespace-lifecycle:7780
+      CARS_NAMESPACE_LIFECYCLE_TOKEN: ${CARS_NAMESPACE_LIFECYCLE_TOKEN}
       PROJECT_DEPLOYMENT_DNS_NAME: ${PROJECT_DEPLOYMENT_DNS_NAME} # Where will projects be deployed online?
       CERT_ISSUANCE_EMAIL: ${CERT_ISSUANCE_EMAIL}
       PROMETHEUS_URL: ${PROMETHEUS_URL}
@@ -58,9 +60,11 @@ services:
       SYSTEM_FROM_EMAIL: ${SYSTEM_FROM_EMAIL}
     depends_on:
       - mysql
+      - build-controller
+      - namespace-lifecycle
     volumes:
-      - ./src:/app/src
       - ./local-data/kubeconfig:/kubeconfig
+      - cars-scratch:/tmp
     ulimits:
       nofile:
         soft: 1048576
@@ -71,12 +75,64 @@ services:
       - "3306"
       - "cars-k3s"
       - "6443"
-      - "npm"
-      - "run"
-      - "start:dev"
+      - "node"
+      - "dist/src/server.js"
+    user: "65532:65532"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+
+  build-controller:
+    build: .
+    environment:
+      CARS_BUILD_CONTROLLER_TOKEN: ${CARS_BUILD_CONTROLLER_TOKEN}
+      DOCKER_REGISTRY: ${DOCKER_REGISTRY}
+      HOME: /tmp/home
+      XDG_RUNTIME_DIR: /run/user/0
+      STORAGE_DRIVER: vfs
+      BUILDAH_ISOLATION: chroot
+      CARS_BUILD_CONTROLLER_LISTEN_HOST: 0.0.0.0
+    command: ["node", "dist/src/build-controller-server.js"]
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "SETFCAP", "MKNOD", "SYS_ADMIN", "SYS_CHROOT", "SYS_RESOURCE"]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=unconfined
+      - apparmor=unconfined
+    volumes:
+      - cars-scratch:/tmp
+      - buildah-storage:/var/lib/containers
+    tmpfs:
+      - /var/tmp
+      - /run
+
+  namespace-lifecycle:
+    build: .
+    environment:
+      KUBECONFIG: ${KUBECONFIG_FILE_PATH}
+      CARS_NAMESPACE_LIFECYCLE_TOKEN: ${CARS_NAMESPACE_LIFECYCLE_TOKEN}
+      CARS_NAMESPACE_LIFECYCLE_LISTEN_PORT: "7780"
+    command:
+      - "/wait-for-services.sh"
+      - "cars-k3s"
+      - "6443"
+      - "cars-k3s"
+      - "6443"
+      - "node"
+      - "dist/src/namespace-lifecycle-server.js"
+    depends_on: [k3s-server]
+    user: "65532:65532"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./local-data/kubeconfig:/kubeconfig
+    tmpfs:
+      - /tmp
 
   k3s-server:
-    image: rancher/k3s:latest
+    image: rancher/k3s:v1.34.1-k3s1@sha256:5e0707cfd1239b358ef73f3254bc3eadc027dd30cd5ec6ca41e29e47652a1b8c
     container_name: cars-k3s
     privileged: true
     tmpfs:
@@ -95,7 +151,7 @@ services:
     restart: always
     environment:
       K3S_KUBECONFIG_OUTPUT: /output/kubeconfig.yaml
-      K3S_KUBECONFIG_MODE: "666"
+      K3S_KUBECONFIG_MODE: "666" # local demo volume shared with the two non-root CARS processes
       K3S_TOKEN: ${K3S_TOKEN}
     volumes:
       - k3s-server:/var/lib/rancher/k3s
@@ -103,29 +159,16 @@ services:
       - ./registries.yaml:/etc/rancher/k3s/registries.yaml:ro
       - ./kubelet-config.yaml:/etc/rancher/k3s/kubelet-config.yaml
     ports:
-      - "6080:80"
-      - "6443:443"
+      - "127.0.0.1:6080:80"
+      - "127.0.0.1:6443:443"
 
   registry:
-    image: registry:2
+    image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
     container_name: cars-registry
     volumes:
       - ./local-data/registry:/var/lib/registry
 
-  dind:
-    image: docker:20-dind
-    container_name: cars-dind
-    privileged: true
-    environment:
-      DOCKER_TLS_CERTDIR: ""
-    command: [ "--insecure-registry=cars-registry:5000" ]
-    volumes:
-      - dind-storage:/var/lib/docker
-    ulimits:
-      nofile:
-        soft: 1048576
-        hard: 1048576
-
 volumes:
   k3s-server: {}
-  dind-storage: {}
+  cars-scratch: {}
+  buildah-storage: {}

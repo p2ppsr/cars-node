@@ -28,22 +28,30 @@ docker build \
   --build-arg "APP_COMMIT=${source_sha}" \
   --build-arg "APP_VERSION=${package_version}" \
   -t "${push_image}" .
-docker push "${push_image}"
+push_output="$(docker push "${push_image}" 2>&1 | tee /dev/stderr)"
+image_digest="$(sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\).*$/\1/p' <<<"${push_output}" | tail -n 1)"
+[[ "${image_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+  echo "registry push did not return a valid image digest" >&2
+  exit 1
+}
+immutable_pull_image="${pull_image}@${image_digest}"
 
 cat > release-manifest.json <<EOF
 {
   "source_sha": "${source_sha}",
   "version": "${package_version}",
   "image_tag": "${image_tag}",
-  "image": "${pull_image}"
+  "image": "${immutable_pull_image}",
+  "image_digest": "${image_digest}"
 }
 EOF
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
     printf 'image_tag=%s\n' "${image_tag}"
-    printf 'image=%s\n' "${pull_image}"
+    printf 'image=%s\n' "${immutable_pull_image}"
+    printf 'image_digest=%s\n' "${image_digest}"
   } >> "${GITHUB_OUTPUT}"
 fi
 
-printf 'Pushed image %s\n' "${pull_image}"
+printf 'Pushed image %s\n' "${immutable_pull_image}"

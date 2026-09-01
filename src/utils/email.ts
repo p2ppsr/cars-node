@@ -1,4 +1,5 @@
 import sgMail from '@sendgrid/mail';
+import logger from '../logger';
 
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const SYSTEM_FROM_EMAIL = process.env.SYSTEM_FROM_EMAIL;
@@ -42,17 +43,17 @@ function sanitizeEmails(emails: string[] = []): string[] {
  */
 function ensureSendGridConfigured(): boolean {
   if (!SENDGRID_API_KEY) {
-    console.error('[email] SENDGRID_API_KEY not set in environment variables');
+    logger.error({ alert: 'cars.email.not_configured' }, 'SENDGRID_API_KEY is not configured');
     return false;
   }
   if (!SYSTEM_FROM_EMAIL) {
-    console.error('[email] SYSTEM_FROM_EMAIL not set in environment variables');
+    logger.error({ alert: 'cars.email.not_configured' }, 'SYSTEM_FROM_EMAIL is not configured');
     return false;
   }
   try {
     sgMail.setApiKey(SENDGRID_API_KEY);
   } catch (err) {
-    console.error('[email] Failed to set SendGrid API key:', err);
+    logger.error({ error: (err as Error).message, alert: 'cars.email.configuration_failed' }, 'Failed to configure SendGrid');
     return false;
   }
   return true;
@@ -69,7 +70,7 @@ async function sendSafe(toList: string[], subject: string, body: string): Promis
 
   if (to.length === 0) {
     // Nothing to send to; fail quietly per requirements.
-    console.info('[email] No valid recipients after filtering; skipping send.');
+    logger.info('No valid email recipients after filtering; skipping send');
     return;
   }
 
@@ -92,11 +93,11 @@ async function sendSafe(toList: string[], subject: string, body: string): Promis
     // Never crash the server—log enough context to debug.
     const code = err?.code;
     const resp = err?.response;
-    console.error('[email] SendGrid send failed', {
+    logger.error({
       code,
       errors: resp?.body?.errors,
-      headers: resp?.headers,
-    });
+      alert: 'cars.email.delivery_failed',
+    }, 'SendGrid delivery failed');
     // Swallow the error to keep the app resilient.
   }
 }

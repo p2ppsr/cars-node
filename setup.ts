@@ -84,16 +84,16 @@ const envVars: EnvVarDefinition[] = [
     {
         key: 'MYSQL_PASSWORD',
         description: 'The password for the MySQL user.',
-        default: 'cars_pass',
+        default: '',
         mask: true,
-        validate: (val) => val.length > 0
+        validate: (val) => val.length >= 20
     },
     {
         key: 'MYSQL_ROOT_PASSWORD',
         description: 'The root password for the MySQL instance.',
-        default: 'rootpassword',
+        default: '',
         mask: true,
-        validate: (val) => val.length > 0
+        validate: (val) => val.length >= 20
     },
     {
         key: 'MYSQL_DATABASE_URL',
@@ -104,9 +104,9 @@ const envVars: EnvVarDefinition[] = [
     },
     {
         key: 'CARS_PROJECT_DB_MODE',
-        description: 'Project database mode. Use shared for new deployments; legacy-per-project keeps old per-project DB workloads.',
+        description: 'Project database mode. Shared is the only supported secure mode.',
         default: 'shared',
-        validate: (val) => val === 'shared' || val === 'legacy-per-project'
+        validate: (val) => val === 'shared'
     },
     {
         key: 'SHARED_DB_NAMESPACE',
@@ -221,20 +221,14 @@ const envVars: EnvVarDefinition[] = [
     {
         key: 'K3S_TOKEN',
         description: 'Authentication token for the K3S (Kubernetes) cluster.',
-        default: 'cars-token',
+        default: '',
         mask: true,
-        validate: (val) => val.length > 0
+        validate: (val) => val.length >= 32
     },
     {
         key: 'KUBECONFIG_FILE_PATH',
         description: 'Path to the kubeconfig file used to connect to the Kubernetes cluster.',
         default: '/kubeconfig/kubeconfig.yaml',
-        validate: (val) => val.trim().length > 0,
-    },
-    {
-        key: 'DOCKER_HOST',
-        description: 'The Docker daemon host address used for building images.',
-        default: 'tcp://dind:2375',
         validate: (val) => val.trim().length > 0,
     },
     {

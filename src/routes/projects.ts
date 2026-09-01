@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import logger from '../logger';
 import type { Knex } from 'knex';
 import { Utils, WalletInterface } from '@bsv/sdk';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import dns from 'dns/promises';
 import { sendAdminNotificationEmail, sendWelcomeEmail, sendDomainChangeEmail } from '../utils/email';
 import { enableIngress } from '../utils/ingress';
@@ -22,7 +22,11 @@ const router = Router();
 const VALID_LOG_PERIODS = ['5m', '15m', '30m', '1h', '2h', '6h', '12h', '1d', '2d', '7d'] as const;
 const VALID_LOG_LEVELS = ['all', 'error', 'warn', 'info'] as const;
 const MAX_TAIL_LINES = 10000;
-const MAX_PAYMENT_CHUNK_SATS = parseInt(process.env.CARS_MAX_PAYMENT_CHUNK_SATS || '10000', 10);
+const configuredPaymentChunk = Number.parseInt(process.env.CARS_MAX_PAYMENT_CHUNK_SATS || '10000', 10);
+if (!Number.isSafeInteger(configuredPaymentChunk) || configuredPaymentChunk < 1 || configuredPaymentChunk > 100_000_000) {
+    throw new Error('CARS_MAX_PAYMENT_CHUNK_SATS must be an integer between 1 and 100000000');
+}
+const MAX_PAYMENT_CHUNK_SATS = configuredPaymentChunk;
 
 type LogPeriod = typeof VALID_LOG_PERIODS[number];
 type LogLevel = typeof VALID_LOG_LEVELS[number];
@@ -144,6 +148,10 @@ router.post('/create', requireRegisteredUser, async (req: Request, res: Response
     const { db }: { db: Knex } = req as any;
     const identityKey = (req as any).auth.identityKey;
     let { name, network } = req.body;
+    if (name != null && (typeof name !== 'string' || name.trim().length < 1 || name.trim().length > 120 || /[\x00-\x1f\x7f]/.test(name))) {
+        return res.status(400).json({ error: 'Project name must be 1-120 printable characters' });
+    }
+    name = typeof name === 'string' ? name.trim() : 'Unnamed Project';
     try {
         network = normalizeProjectNetwork(network);
     } catch (error: any) {
@@ -184,7 +192,7 @@ router.post('/create', requireRegisteredUser, async (req: Request, res: Response
         await db.transaction(async trx => {
             const inserted = await trx('projects').insert({
                 project_uuid: projectId,
-                name: name || 'Unnamed Project',
+                name,
                 balance: 0,
                 network,
                 private_key: null,
@@ -265,23 +273,28 @@ router.post('/:projectId/pay', requireRegisteredUser, requireProject, requirePro
         });
     }
 
-    const oldBalance = Number(project.balance);
-    const newBalance = oldBalance + validation.amount;
-    await db('projects').where({ id: project.id }).update({ balance: newBalance });
-
-    // Insert accounting record (credit)
-    const metadata = { reason: 'Admin payment' };
-    await db('project_accounting').insert({
-        project_id: project.id,
-        type: 'credit',
-        amount_sats: validation.amount,
-        balance_after: newBalance,
-        metadata: JSON.stringify(metadata)
-    });
-
-    await db('logs').insert({
-        project_id: project.id,
-        message: `Balance increased by ${validation.amount}. New balance: ${newBalance}`
+    let oldBalance = 0;
+    let newBalance = 0;
+    await db.transaction(async trx => {
+        const lockedProject = await trx('projects').where({ id: project.id }).forUpdate().first();
+        if (!lockedProject) throw new Error('Project disappeared while applying payment');
+        oldBalance = Number(lockedProject.balance);
+        newBalance = oldBalance + validation.amount;
+        if (!Number.isSafeInteger(oldBalance) || !Number.isSafeInteger(newBalance)) {
+            throw new Error('Project balance is outside the supported integer range');
+        }
+        await trx('projects').where({ id: project.id }).update({ balance: newBalance });
+        await trx('project_accounting').insert({
+            project_id: project.id,
+            type: 'credit',
+            amount_sats: validation.amount,
+            balance_after: newBalance,
+            metadata: JSON.stringify({ reason: 'Admin payment' })
+        });
+        await trx('logs').insert({
+            project_id: project.id,
+            message: `Balance increased by ${validation.amount}. New balance: ${newBalance}`
+        });
     });
 
     // If balance was negative and now is >=0, re-enable ingress
@@ -327,9 +340,11 @@ router.post('/list', requireRegisteredUser, async (req: Request, res: Response) 
  * Helper to resolve a user by identityKey or email
  */
 async function resolveUser(db: Knex, identityOrEmail: string) {
+    if (typeof identityOrEmail !== 'string' || identityOrEmail.length > 254) return undefined;
     let user = await db('users').where({ identity_key: identityOrEmail }).first();
     if (!user && identityOrEmail.includes('@')) {
-        user = await db('users').where({ email: identityOrEmail }).first();
+        const matches = await db('users').where({ email: identityOrEmail.trim().toLowerCase() }).limit(2);
+        if (matches.length === 1 && matches[0].email !== 'placeholder@domain.com') user = matches[0];
     }
     return user;
 }
@@ -473,7 +488,14 @@ router.post('/:projectId/deploys/list', requireRegisteredUser, requireProject, r
     const { db }: { db: Knex } = req as any;
     const project = (req as any).project;
 
-    const deploys = await db('deploys').where({ project_id: project.id }).select('deployment_uuid', 'created_at');
+    const deploys = await db('deploys').where({ project_id: project.id }).select(
+        'deployment_uuid',
+        'status',
+        'error_message',
+        'created_at',
+        'accepted_at',
+        'completed_at',
+    );
     res.json({ deploys });
 });
 
@@ -497,7 +519,8 @@ router.post('/:projectId/deploy', requireRegisteredUser, async (req: Request, re
     const [depId] = await db('deploys').insert({
         deployment_uuid: deploymentId,
         project_id: project.id,
-        creator_identity_key: identityKey
+        creator_identity_key: identityKey,
+        status: 'pending',
     }, ['id']).returning('id');
 
     await db('logs').insert({
@@ -539,10 +562,13 @@ router.post('/:projectId/webui/config', requireRegisteredUser, requireProject, r
     }
 
     try {
-        JSON.stringify(config);
+        const serialized = JSON.stringify(config);
+        if (Buffer.byteLength(serialized) > 64 * 1024) {
+            return res.status(413).json({ error: 'Web UI config exceeds 64 KiB' });
+        }
         await db('projects')
             .where({ id: project.id })
-            .update({ web_ui_config: JSON.stringify(config) });
+            .update({ web_ui_config: serialized });
 
         await db('logs').insert({
             project_id: project.id,
@@ -867,7 +893,10 @@ router.post('/:projectId/logs/resource/:resource', requireRegisteredUser, requir
         }
 
         const namespace = `cars-project-${project.project_uuid}`;
-        const podsOutput = execSync(`kubectl get pods -n ${namespace} -o json`);
+        const podsOutput = execFileSync('kubectl', ['get', 'pods', '-n', namespace, '-o', 'json'], {
+            maxBuffer: 16 * 1024 * 1024,
+            timeout: 30_000,
+        });
         const pods = JSON.parse(podsOutput.toString());
 
         if (!pods.items?.length) {
@@ -888,8 +917,9 @@ router.post('/:projectId/logs/resource/:resource', requireRegisteredUser, requir
             }
 
             // Fetch logs from the pod (no container specification needed)
-            const cmd = `kubectl logs -n ${namespace} ${podName} --since=${since} --tail=${sanitizedTail}`;
-            logs = execSync(cmd).toString();
+            logs = execFileSync('kubectl', [
+                'logs', '-n', namespace, podName, `--since=${since}`, `--tail=${sanitizedTail}`,
+            ], { maxBuffer: 16 * 1024 * 1024, timeout: 30_000 }).toString();
         } else {
             // For frontend and backend, find the main deployment pod
             const pod = pods.items.find(x => x.metadata.name.startsWith('cars-project-'));
@@ -905,8 +935,10 @@ router.post('/:projectId/logs/resource/:resource', requireRegisteredUser, requir
             }
 
             // Fetch logs from the specific container
-            const cmd = `kubectl logs -n ${namespace} ${podName} -c ${resource} --since=${since} --tail=${sanitizedTail}`;
-            logs = execSync(cmd).toString();
+            logs = execFileSync('kubectl', [
+                'logs', '-n', namespace, podName, '-c', resource,
+                `--since=${since}`, `--tail=${sanitizedTail}`,
+            ], { maxBuffer: 16 * 1024 * 1024, timeout: 30_000 }).toString();
         }
 
         // Filter logs by level if required
@@ -953,7 +985,10 @@ async function handleCustomDomain(
     const user = (req as any).user;
 
     const { domain } = req.body;
-    if (!domain || typeof domain !== 'string' || !domain.match(/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/)) {
+    const validDomain = (value: string) => value.length <= 253 && value.includes('.') && value.split('.').every(label =>
+        label.length >= 1 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label)
+    );
+    if (!domain || typeof domain !== 'string' || !validDomain(domain)) {
         return res.status(400).json({ error: 'Invalid domain format. Please provide a valid domain (e.g. example.com)' });
     }
     const normalizedDomain = domain.toLowerCase();
@@ -985,15 +1020,45 @@ async function handleCustomDomain(
             });
         }
 
-        // If found, update the database
+        // Atomically claim the hostname across frontend and backend routes. A
+        // DNS proof can be changed later, so the database constraint is what
+        // prevents two projects from racing to route the same hostname.
         const updateField = domainType === 'frontend' ? 'frontend_custom_domain' : 'backend_custom_domain';
-        await db('projects')
-            .where({ id: project.id })
-            .update({ [updateField]: normalizedDomain });
-
-        await db('logs').insert({
-            project_id: project.id,
-            message: `${domainType.charAt(0).toUpperCase() + domainType.slice(1)} custom domain set: ${normalizedDomain}`
+        await db.transaction(async trx => {
+            const lockedProject = await trx('projects').where({ id: project.id }).forUpdate().first();
+            if (!lockedProject) throw new Error('Project disappeared while claiming custom domain');
+            const existingClaim = await trx('cars_domain_claims').where({ domain: normalizedDomain }).forUpdate().first();
+            if (existingClaim && Number(existingClaim.project_id) !== Number(project.id)) {
+                const conflict: any = new Error('Custom domain is already assigned to another project');
+                conflict.statusCode = 409;
+                throw conflict;
+            }
+            if (!existingClaim) {
+                try {
+                    await trx('cars_domain_claims').insert({ domain: normalizedDomain, project_id: project.id });
+                } catch (error: any) {
+                    if (error?.code === 'ER_DUP_ENTRY' || error?.errno === 1062) {
+                        const conflict: any = new Error('Custom domain is already assigned to another project');
+                        conflict.statusCode = 409;
+                        throw conflict;
+                    }
+                    throw error;
+                }
+            }
+            const previousDomain = lockedProject[updateField];
+            await trx('projects').where({ id: project.id }).update({ [updateField]: normalizedDomain });
+            if (previousDomain && previousDomain !== normalizedDomain) {
+                const otherField = domainType === 'frontend' ? 'backend_custom_domain' : 'frontend_custom_domain';
+                if (lockedProject[otherField] !== previousDomain) {
+                    await trx('cars_domain_claims')
+                        .where({ domain: previousDomain, project_id: project.id })
+                        .del();
+                }
+            }
+            await trx('logs').insert({
+                project_id: project.id,
+                message: `${domainType.charAt(0).toUpperCase() + domainType.slice(1)} custom domain set: ${normalizedDomain}`
+            });
         });
 
         // Notify admins of domain change
@@ -1020,6 +1085,9 @@ CARS System`;
             domainType
         }, `${domainType.charAt(0).toUpperCase() + domainType.slice(1)} custom domain verified and set`);
     } catch (err: any) {
+        if (err?.statusCode === 409) {
+            return res.status(409).json({ error: 'Custom domain is already assigned to another CARS project' });
+        }
         // DNS query failed or some other error
         logger.error({ err: err.message }, 'Error during DNS verification process');
         const instructions = `Please ensure that DNS is functioning and that you create a TXT record:\n\n  ${verificationHost}\n\nWith the value:\n\n  ${expectedRecord}\n\nThen try again.`;
@@ -1101,7 +1169,7 @@ router.post('/:projectId/settings/update', requireRegisteredUser, requireProject
         engineConfig.logTime = logTime;
     }
     if (typeof logPrefix === 'string') {
-        engineConfig.logPrefix = logPrefix;
+        engineConfig.logPrefix = logPrefix.slice(0, 256);
     }
     if (typeof throwOnBroadcastFailure === 'boolean') {
         engineConfig.throwOnBroadcastFailure = throwOnBroadcastFailure;
@@ -1111,8 +1179,12 @@ router.post('/:projectId/settings/update', requireRegisteredUser, requireProject
     }
 
     // Save back to DB
+    const serializedEngineConfig = JSON.stringify(engineConfig);
+    if (Buffer.byteLength(serializedEngineConfig) > 64 * 1024) {
+        return res.status(413).json({ error: 'Engine config exceeds 64 KiB' });
+    }
     await db('projects').where({ id: project.id }).update({
-        engine_config: JSON.stringify(engineConfig)
+        engine_config: serializedEngineConfig
     });
 
     await db('logs').insert({
@@ -1141,6 +1213,15 @@ export function getBackendDomain(project: any) {
     return project.backend_custom_domain || `backend.${project.project_uuid}.${projectsDomain}`;
 }
 
+export function getInternalBackendUrl(project: any) {
+    if (!project || !/^[a-f0-9]{32}$/.test(project.project_uuid)) {
+        throw new Error('Invalid CARS project identifier');
+    }
+    const namespace = `cars-project-${project.project_uuid}`;
+    const release = `cars-project-${project.project_uuid.substring(0, 24)}`;
+    return `http://${release}-service.${namespace}.svc.cluster.local:8080`;
+}
+
 /**
  * Admin route: syncAdvertisements
  * We'll POST to https://<backend-domain>/admin/syncAdvertisements using Bearer token
@@ -1153,14 +1234,17 @@ router.post('/:projectId/admin/syncAdvertisements', requireRegisteredUser, requi
     }
 
     const backendDomain = getBackendDomain(project);
-    const url = `https://${backendDomain}/admin/syncAdvertisements`;
+    const url = `${getInternalBackendUrl(project)}/admin/syncAdvertisements`;
 
     try {
         const response = await axios.post(url, {}, {
             headers: {
                 Authorization: `Bearer ${adminBearerToken}`
             },
-            timeout: 120000
+            timeout: 120000,
+            maxRedirects: 0,
+            maxContentLength: 1024 * 1024,
+            maxBodyLength: 1024 * 1024,
         });
         return res.json({
             message: 'syncAdvertisements called successfully',
@@ -1185,12 +1269,12 @@ router.post('/:projectId/admin/evictOutpoint', requireRegisteredUser, requirePro
     if (!adminBearerToken) {
         return res.status(400).json({ error: 'No admin bearer token stored for this project' });
     }
-    if (!req.body.txid || typeof req.body.outputIndex !== 'number') {
+    if (!/^[a-f0-9]{64}$/i.test(req.body.txid || '') || !Number.isSafeInteger(req.body.outputIndex) || req.body.outputIndex < 0 || req.body.outputIndex > 0xffffffff) {
         return res.status(400).json({ error: 'No txid or outputIndex provided' })
     }
 
     const backendDomain = getBackendDomain(project);
-    const url = `https://${backendDomain}/admin/evictOutpoint`;
+    const url = `${getInternalBackendUrl(project)}/admin/evictOutpoint`;
 
     try {
         const response = await axios.post(url, {
@@ -1201,7 +1285,10 @@ router.post('/:projectId/admin/evictOutpoint', requireRegisteredUser, requirePro
             headers: {
                 Authorization: `Bearer ${adminBearerToken}`
             },
-            timeout: 120000
+            timeout: 120000,
+            maxRedirects: 0,
+            maxContentLength: 1024 * 1024,
+            maxBodyLength: 1024 * 1024,
         });
         return res.json({
             message: 'evictOutpoint called successfully',
@@ -1228,14 +1315,17 @@ router.post('/:projectId/admin/startGASPSync', requireRegisteredUser, requirePro
     }
 
     const backendDomain = getBackendDomain(project);
-    const url = `https://${backendDomain}/admin/startGASPSync`;
+    const url = `${getInternalBackendUrl(project)}/admin/startGASPSync`;
 
     try {
         const response = await axios.post(url, {}, {
             headers: {
                 Authorization: `Bearer ${adminBearerToken}`
             },
-            timeout: 3600000
+            timeout: 3600000,
+            maxRedirects: 0,
+            maxContentLength: 1024 * 1024,
+            maxBodyLength: 1024 * 1024,
         });
         return res.json({
             message: 'startGASPSync called successfully',
