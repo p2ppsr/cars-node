@@ -2,13 +2,19 @@ import logger from '../logger';
 import { sendThresholdEmail } from './email';
 import axios from 'axios';
 import db from '../db';
-import { disableIngress, enableIngress } from './ingress';
 
-// Configurable billing rates (default values as before)
-const CPU_RATE_PER_CORE_5MIN = parseInt(process.env.CPU_RATE_PER_CORE_5MIN || "1000", 10);
-const MEM_RATE_PER_GB_5MIN = parseInt(process.env.MEM_RATE_PER_GB_5MIN || "500", 10);
-const DISK_RATE_PER_GB_5MIN = parseInt(process.env.DISK_RATE_PER_GB_5MIN || "10", 10);
-const NET_RATE_PER_GB_5MIN = parseInt(process.env.NET_RATE_PER_GB_5MIN || "200", 10);
+function billingRate(name: string, fallback: number): number {
+    const value = Number.parseInt(process.env[name] || String(fallback), 10);
+    if (!Number.isSafeInteger(value) || value < 0 || value > 1_000_000_000) {
+        throw new Error(`${name} must be a non-negative integer no greater than 1000000000`);
+    }
+    return value;
+}
+
+const CPU_RATE_PER_CORE_5MIN = billingRate('CPU_RATE_PER_CORE_5MIN', 1000);
+const MEM_RATE_PER_GB_5MIN = billingRate('MEM_RATE_PER_GB_5MIN', 500);
+const DISK_RATE_PER_GB_5MIN = billingRate('DISK_RATE_PER_GB_5MIN', 10);
+const NET_RATE_PER_GB_5MIN = billingRate('NET_RATE_PER_GB_5MIN', 200);
 
 // Prometheus URL
 const PROMETHEUS_URL = process.env.PROMETHEUS_URL || 'http://prometheus-kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090';
@@ -22,7 +28,12 @@ const BILLING_THRESHOLDS = [
 async function queryPrometheus(query: string): Promise<number> {
     const url = `${PROMETHEUS_URL}/api/v1/query`;
     const params = { query };
-    const resp = await axios.get(url, { params });
+    const resp = await axios.get(url, {
+        params,
+        timeout: 5000,
+        maxRedirects: 0,
+        maxContentLength: 1024 * 1024,
+    });
     if (resp.data.status !== 'success') {
         throw new Error(`Prometheus query failed: ${JSON.stringify(resp.data)}`);
     }
@@ -53,7 +64,6 @@ export async function billProjects() {
 
     for (const project of projects) {
         const namespace = `cars-project-${project.project_uuid}`;
-        const oldBalance = Number(project.balance);
 
         try {
             // CPU (CPU cores over last 5m): use rate of cpu_usage_seconds_total
@@ -75,13 +85,7 @@ export async function billProjects() {
             // Disk usage: If we have PVCs, kubelet_volume_stats_used_bytes will be available.
             // We take average usage over 5m:
             const diskQuery = `avg_over_time(kubelet_volume_stats_used_bytes{namespace="${namespace}"}[5m])`;
-            let diskBytes = 0;
-            try {
-                diskBytes = await queryPrometheus(diskQuery);
-            } catch (err) {
-                // It's possible no volumes are found. If so, leave diskBytes=0.
-                diskBytes = 0;
-            }
+            const diskBytes = await queryPrometheus(diskQuery);
 
             // Convert to GB
             const memGB = memoryBytes / (1024 * 1024 * 1024);
@@ -97,12 +101,11 @@ export async function billProjects() {
             const netCost = Math.ceil(netGB * NET_RATE_PER_GB_5MIN);
 
             const totalCost = cpuCost + memCost + diskCost + netCost;
+            if (!Number.isSafeInteger(totalCost) || totalCost < 0) {
+                throw new Error('Calculated project billing cost is outside the supported integer range');
+            }
 
             if (totalCost > 0) {
-                const newBalance = oldBalance - totalCost;
-                await db('projects').where({ id: project.id }).update({ balance: newBalance });
-
-                // Insert accounting record
                 const metadata = {
                     cpuCost,
                     memCost,
@@ -115,24 +118,34 @@ export async function billProjects() {
                         NET_RATE_PER_GB_5MIN
                     }
                 };
-
-                await db('project_accounting').insert({
-                    project_id: project.id,
-                    type: 'debit',
-                    amount_sats: totalCost,
-                    balance_after: newBalance,
-                    metadata: JSON.stringify(metadata)
-                });
-
-                await db('logs').insert({
-                    project_id: project.id,
-                    message: `Billed ${totalCost} sat (CPU:${cpuCost}, MEM:${memCost}, DISK:${diskCost}, NET:${netCost}) for last 5m. New balance: ${newBalance}`
+                let lockedOldBalance = 0;
+                let newBalance = 0;
+                await db.transaction(async trx => {
+                    const lockedProject = await trx('projects').where({ id: project.id }).forUpdate().first();
+                    if (!lockedProject) throw new Error('Project disappeared while billing');
+                    lockedOldBalance = Number(lockedProject.balance);
+                    newBalance = lockedOldBalance - totalCost;
+                    if (!Number.isSafeInteger(lockedOldBalance) || !Number.isSafeInteger(newBalance)) {
+                        throw new Error('Project balance is outside the supported integer range');
+                    }
+                    await trx('projects').where({ id: project.id }).update({ balance: newBalance });
+                    await trx('project_accounting').insert({
+                        project_id: project.id,
+                        type: 'debit',
+                        amount_sats: totalCost,
+                        balance_after: newBalance,
+                        metadata: JSON.stringify(metadata)
+                    });
+                    await trx('logs').insert({
+                        project_id: project.id,
+                        message: `Billed ${totalCost} sat (CPU:${cpuCost}, MEM:${memCost}, DISK:${diskCost}, NET:${netCost}) for last 5m. New balance: ${newBalance}`
+                    });
                 });
                 logger.info({ project_uuid: project.project_uuid }, `Billed ${totalCost} sat for project (CPU:${cpuCost}, MEM:${memCost}, DISK:${diskCost}, NET:${netCost}). New balance: ${newBalance}`);
 
                 // Check thresholds
                 const notifiedThresholds = [];
-                const crossed = getCrossedThresholds(oldBalance, newBalance, notifiedThresholds);
+                const crossed = getCrossedThresholds(lockedOldBalance, newBalance, notifiedThresholds);
                 if (crossed.length > 0) {
                     // Send emails for each crossed threshold
                     const admins = await db('project_admins')
@@ -152,7 +165,7 @@ export async function billProjects() {
                 }
 
                 // Check if we need to disable ingress (balance < 0)
-                if (oldBalance >= 0 && newBalance < 0) {
+                if (lockedOldBalance >= 0 && newBalance < 0) {
                     // disable ingress
                     // NOT ACTUALLY DISABLING INGRESS UNTIL PAYMENT IS IMPLEMENTED
                     // await disableIngress(project.project_uuid);
@@ -165,7 +178,11 @@ export async function billProjects() {
             }
 
         } catch (error: any) {
-            logger.error({ project_uuid: project.project_uuid, error: error.message }, 'Failed to bill project');
+            logger.error({
+                project_uuid: project.project_uuid,
+                error: error.message,
+                alert: 'cars.cron.project_billing.failed',
+            }, 'Failed to bill project');
         }
     }
 }

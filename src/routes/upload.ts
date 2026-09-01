@@ -5,8 +5,10 @@ import { Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import { Utils, type WalletInterface } from '@bsv/sdk';
 import type { Knex } from 'knex';
-import { spawn } from 'child_process';
 import logger from '../logger';
+import { extractTarGz } from '../archive';
+import { buildProjectImage } from '../build-controller';
+import { runCommand } from '../process';
 import {
   CARSConfig,
   CARSConfigInfo,
@@ -35,15 +37,82 @@ import { inspectProjectCapabilities, replaceProjectCapabilities } from '../adver
 import { buildProjectIngressTls } from '../ingress-tls';
 import { isPublicDiscoveryRoot } from '../public-discovery-root';
 import { ensureProjectNamespace } from '../namespace-lifecycle';
+import { deploymentWorkspaceRoot } from '../deployment-workspace';
 import {
   DEFAULT_DISCOVERY_DENYLIST,
   serializeDiscoveryCapabilityDenylist,
 } from '../discovery-denylist';
 
 const projectsDomain: string = process.env.PROJECT_DEPLOYMENT_DNS_NAME!;
+const deploymentIdPattern = /^[a-f0-9]{32}$/;
+const signaturePattern = /^[a-f0-9]{64,512}$/;
+
+function boundedInteger(name: string, fallback: number, minimum: number, maximum: number): number {
+  const parsed = Number.parseInt(process.env[name] || '', 10);
+  return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
+}
+
+const maxUploadBytes = boundedInteger('CARS_UPLOAD_MAX_BYTES', 1024 * 1024 * 1024, 1024, 4 * 1024 * 1024 * 1024);
+const maxArchiveEntries = boundedInteger('CARS_ARCHIVE_MAX_ENTRIES', 50_000, 1, 200_000);
+const maxArchiveExpandedBytes = boundedInteger('CARS_ARCHIVE_MAX_EXPANDED_BYTES', 2 * 1024 * 1024 * 1024, 1024, 8 * 1024 * 1024 * 1024);
+const uploadUrlTtlMs = boundedInteger('CARS_UPLOAD_URL_TTL_MS', 60 * 60 * 1000, 60_000, 24 * 60 * 60 * 1000);
 
 function yamlString(value: string) {
   return JSON.stringify(value);
+}
+
+function readBoundedJson(file: string, label: string, maxBytes = 1024 * 1024): any {
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size < 1 || stat.size > maxBytes) {
+      throw new Error(`${label} must be a regular JSON file no larger than ${maxBytes} bytes`);
+    }
+    try {
+      return JSON.parse(fs.readFileSync(descriptor, 'utf8'));
+    } catch {
+      throw new Error(`${label} is not valid JSON`);
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateDeploymentInfo(value: any): asserts value is CARSConfigInfo {
+  if (!isRecord(value) || value.schema !== 'bsv-app') throw new Error('Invalid schema in deployment-info.json');
+  if (!Array.isArray(value.configs) || value.configs.length > 32 || value.configs.some((config: any) => !isRecord(config))) {
+    throw new Error('deployment-info.json contains invalid configs');
+  }
+  const validateCapabilities = (record: any, kind: 'topic' | 'lookup') => {
+    if (record == null) return;
+    if (!isRecord(record) || Object.keys(record).length > 500) throw new Error(`Too many or invalid ${kind} capabilities`);
+    for (const [name, definition] of Object.entries(record)) {
+      if (name.length < 1 || name.length > 255 || /[\x00-\x1f\x7f]/.test(name)) throw new Error(`Invalid ${kind} capability name`);
+      const sourcePath = kind === 'topic' ? definition : (definition as any)?.serviceFactory;
+      if (typeof sourcePath !== 'string' || sourcePath.length < 1 || sourcePath.length > 1024 || /[\x00-\x1f\x7f]/.test(sourcePath)) {
+        throw new Error(`Invalid ${kind} capability source path`);
+      }
+      if (kind === 'lookup' && ![undefined, 'mongo', 'knex'].includes((definition as any)?.hydrateWith)) {
+        throw new Error('Invalid lookup capability hydration mode');
+      }
+    }
+  };
+  validateCapabilities(value.topicManagers, 'topic');
+  validateCapabilities(value.lookupServices, 'lookup');
+}
+
+function validateDependencies(value: any): Record<string, string> {
+  if (!isRecord(value) || Object.keys(value).length > 500) throw new Error('Backend dependencies must be an object with at most 500 entries');
+  for (const [name, version] of Object.entries(value)) {
+    if (name.length < 1 || name.length > 214 || /[\x00-\x20\x7f]/.test(name) || typeof version !== 'string' || version.length < 1 || version.length > 512) {
+      throw new Error('Backend dependency name or version is invalid');
+    }
+  }
+  return value as Record<string, string>;
 }
 
 async function writeUploadToFile(req: Request, filePath: string) {
@@ -57,11 +126,16 @@ async function writeUploadToFile(req: Request, filePath: string) {
   try {
     if (Buffer.isBuffer(body)) {
       bytesWritten = body.length;
+      if (bytesWritten > maxUploadBytes) throw new Error(`Upload exceeds ${maxUploadBytes} bytes`);
       await fs.writeFile(partialPath, body);
     } else {
       const counter = new Transform({
         transform(chunk, _encoding, callback) {
           bytesWritten += chunk.length;
+          if (bytesWritten > maxUploadBytes) {
+            callback(new Error(`Upload exceeds ${maxUploadBytes} bytes`));
+            return;
+          }
           callback(null, chunk);
         }
       });
@@ -82,6 +156,10 @@ export default async (req: Request, res: Response) => {
     mainnetWallet: WalletInterface;
   } = req as any;
   const { deploymentId, signature } = req.params;
+  let workspaceRoot: string | undefined;
+  let filePath: string | undefined;
+  let uploadDir: string | undefined;
+  let claimed = false;
 
   // Helper function to log steps to DB logs and logger
   async function logStep(message: string, level: 'info' | 'error' = 'info') {
@@ -98,33 +176,30 @@ export default async (req: Request, res: Response) => {
     }
   }
 
-  // Helper to run commands with error handling
-  async function runCmd(cmd: string, options: any = {}) {
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(cmd, {
-        shell: true,
-        stdio: 'inherit',
-        ...options
-      });
-      child.once('error', err => reject(new Error(`Command failed (${cmd}): ${err.message}`)));
-      child.once('exit', (code, signal) => {
-        if (code === 0) {
-          resolve();
-          return;
-        }
-        reject(new Error(`Command failed (${cmd}): exited with ${signal ? `signal ${signal}` : `code ${code}`}`));
-      });
-    });
-  }
-
   let deploy: any;
   let project: any;
 
   try {
+    if (!deploymentIdPattern.test(deploymentId) || !signaturePattern.test(signature)) {
+      return res.status(400).json({ error: 'Invalid upload credential' });
+    }
+
     // 1) Validate deployment record
     deploy = await db('deploys').where({ deployment_uuid: deploymentId }).first();
     if (!deploy) {
       return res.status(400).json({ error: 'Invalid deploymentId' });
+    }
+    if (deploy.status !== 'pending') {
+      return res.status(409).json({ error: 'Deployment upload URL has already been used' });
+    }
+    const createdAt = new Date(deploy.created_at).getTime();
+    if (!Number.isFinite(createdAt) || createdAt > Date.now() + 5 * 60 * 1000 || Date.now() - createdAt > uploadUrlTtlMs) {
+      await db('deploys').where({ id: deploy.id, status: 'pending' }).update({
+        status: 'expired',
+        error_message: 'Upload URL expired before use',
+        completed_at: db.fn.now(),
+      });
+      return res.status(410).json({ error: 'Deployment upload URL has expired' });
     }
 
     // 2) Fetch project
@@ -133,22 +208,7 @@ export default async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Project not found' });
     }
 
-    // Namespace existence and the exact runtime RoleBinding are controller-owned.
-    // Fail before accepting/building an artifact when that contract cannot be proven.
-    await ensureProjectNamespace(project.project_uuid);
-
-    // 3) Check project balance before accepting the upload body.
-    if (project.balance < 1) {
-      return res.status(401).json({ error: `Project balance must be at least 1 satoshi to upload a deployment. Current balance: ${project.balance}` });
-    }
-
-    // 4) Drain the upload before signature verification. Some wallet verification
-    // paths can block the Node event loop long enough to stall large request
-    // bodies on asymmetric LAN paths, so do not verify until the body is safely
-    // on disk.
-    const filePath = path.join('/tmp', `artifact_${deploymentId}.tgz`);
-    const bytesWritten = await writeUploadToFile(req, filePath);
-
+    // 3) Authenticate the single-use upload URL before reading any request body.
     const { valid } = await wallet.verifySignature({
       data: Utils.toArray(deploymentId, 'hex'),
       signature: Utils.toArray(signature, 'hex'),
@@ -156,14 +216,45 @@ export default async (req: Request, res: Response) => {
       keyID: deploymentId,
       counterparty: 'self'
     });
+    if (!valid) return res.status(401).json({ error: 'Invalid signature' });
 
-    if (!valid) {
-      await fs.remove(filePath).catch(() => undefined);
-      return res.status(401).json({ error: 'Invalid signature' });
+    workspaceRoot = deploymentWorkspaceRoot(project.project_uuid, deploymentId);
+    filePath = path.join(workspaceRoot, 'artifact.tgz');
+    uploadDir = path.join(workspaceRoot, 'source');
+
+    const contentLength = req.header('content-length');
+    if (contentLength) {
+      const parsedLength = Number(contentLength);
+      if (!Number.isSafeInteger(parsedLength) || parsedLength < 0) {
+        return res.status(400).json({ error: 'Invalid Content-Length' });
+      }
+      if (parsedLength > maxUploadBytes) {
+        return res.status(413).json({ error: `Upload exceeds the ${maxUploadBytes}-byte limit` });
+      }
     }
 
-    // 5) Store file locally
-    await db('deploys').where({ id: deploy.id }).update({ file_path: filePath });
+    // Namespace existence and the exact runtime RoleBinding are controller-owned.
+    // Fail before accepting/building an artifact when that contract cannot be proven.
+    await ensureProjectNamespace(project.project_uuid);
+
+    // 4) Check project balance before accepting the upload body.
+    if (project.balance < 1) {
+      return res.status(401).json({ error: `Project balance must be at least 1 satoshi to upload a deployment. Current balance: ${project.balance}` });
+    }
+
+    const claimedRows = await db('deploys').where({ id: deploy.id, status: 'pending' }).update({
+      status: 'uploading',
+      error_message: null,
+      accepted_at: db.fn.now(),
+    });
+    if (Number(claimedRows) !== 1) {
+      return res.status(409).json({ error: 'Deployment upload URL has already been used' });
+    }
+    claimed = true;
+
+    // 5) Stream the bounded authenticated artifact to a private scratch volume.
+    const bytesWritten = await writeUploadToFile(req, filePath);
+    await db('deploys').where({ id: deploy.id }).update({ file_path: filePath, status: 'processing' });
     await logStep(`File uploaded successfully, saved to ${filePath} (${bytesWritten} bytes)`);
 
     // Acknowledge the upload before the long-running build/push/helm workflow.
@@ -175,30 +266,23 @@ export default async (req: Request, res: Response) => {
       projectId: project.project_uuid,
     });
 
-    // 6) Create a working directory for extraction
-    const uploadDir = path.join('/tmp', `build_${deploymentId}`);
-    fs.ensureDirSync(uploadDir);
-
-    // 7) Extract tarball
-    await runCmd(`tar -xzf ${filePath} -C ${uploadDir}`);
-    await logStep(`Tarball extracted at ${uploadDir}`);
+    // 6) Extract only regular files/directories inside strict count and size limits.
+    const extracted = await extractTarGz(filePath, uploadDir, {
+      maxEntries: maxArchiveEntries,
+      maxExpandedBytes: maxArchiveExpandedBytes,
+    });
+    await logStep(`Tarball safely extracted at ${uploadDir} (${extracted.entries} entries, ${extracted.expandedBytes} bytes)`);
 
     // 8) Validate deployment-info.json
     const deploymentInfoPath = path.join(uploadDir, 'deployment-info.json');
     if (!fs.existsSync(deploymentInfoPath)) {
       const errMsg = 'deployment-info.json not found in tarball.';
       await logStep(errMsg, 'error');
-      return res.status(400).json({ error: errMsg });
+      throw new Error(errMsg);
     }
 
-    const deploymentInfo: CARSConfigInfo = JSON.parse(
-      fs.readFileSync(deploymentInfoPath, 'utf-8')
-    );
-    if (deploymentInfo.schema !== 'bsv-app') {
-      const errMsg = 'Invalid schema in deployment-info.json';
-      await logStep(errMsg, 'error');
-      return res.status(400).json({ error: errMsg });
-    }
+    const deploymentInfo = readBoundedJson(deploymentInfoPath, 'deployment-info.json');
+    validateDeploymentInfo(deploymentInfo);
 
     // 9) Check for matching CARS config
     const carsConfig: CARSConfig | undefined = deploymentInfo.configs?.find(
@@ -209,7 +293,7 @@ export default async (req: Request, res: Response) => {
     if (!carsConfig || !carsConfig.projectID) {
       const errMsg = 'No matching CARS config or projectID in deployment-info.json';
       await logStep(errMsg, 'error');
-      return res.status(400).json({ error: errMsg });
+      throw new Error(errMsg);
     }
 
     let deploymentNetwork: ProjectNetwork;
@@ -218,24 +302,27 @@ export default async (req: Request, res: Response) => {
     } catch (error: any) {
       const errMsg = error.message;
       await logStep(errMsg, 'error');
-      return res.status(400).json({ error: errMsg });
+      throw new Error(errMsg);
     }
     const projectNetwork = normalizeProjectNetwork(project.network);
     if (deploymentNetwork !== projectNetwork) {
       const errMsg = `Network mismatch: Project is on ${project.network} but deployment config specifies ${carsConfig.network}`;
       await logStep(errMsg, 'error');
-      return res.status(400).json({ error: errMsg });
+      throw new Error(errMsg);
     }
 
     // 10) Determine whether we are deploying a frontend and/or backend
     const deployTargets = carsConfig.deploy || [];
+    if (!Array.isArray(deployTargets) || deployTargets.length > 2 || deployTargets.some(target => target !== 'frontend' && target !== 'backend')) {
+      throw new Error('CARS deploy targets are invalid');
+    }
     const backendEnabled = deployTargets.includes('backend');
     const frontendEnabled = deployTargets.includes('frontend');
 
     if (!frontendEnabled && !backendEnabled) {
       const errMsg = `No valid deploy targets found (must include "frontend" and/or "backend").`;
       await logStep(errMsg, 'error');
-      return res.status(400).json({ error: errMsg });
+      throw new Error(errMsg);
     }
 
     // 11) Build/push Docker images
@@ -251,14 +338,14 @@ export default async (req: Request, res: Response) => {
       if (!fs.existsSync(frontendDir)) {
         const errMsg = 'Frontend directory not found but frontend deployment requested.';
         await logStep(errMsg, 'error');
-        return res.status(400).json({ error: errMsg });
+        throw new Error(errMsg);
       }
 
       // Add minimal NGINX configuration for static serving
       fs.writeFileSync(
         path.join(frontendDir, 'nginx.conf'),
         `server {
-    listen 80;
+    listen 8080;
     server_name localhost;
     root /usr/share/nginx/html;
 
@@ -304,16 +391,21 @@ export default async (req: Request, res: Response) => {
       // Dockerfile for serving static files
       fs.writeFileSync(
         path.join(frontendDir, 'Dockerfile'),
-        `FROM docker.io/nginx:alpine
+        `FROM docker.io/nginxinc/nginx-unprivileged:alpine@sha256:d9083fe47768377ef55dedafd67d4da7c2f2bc2bece7554954f29359deb0dce9
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY . /usr/share/nginx/html
-EXPOSE 80`
+EXPOSE 8080`
       );
 
-      // Build + push
-      await runCmd(`buildah build --storage-driver=vfs  --isolation=chroot -t ${frontendImage} .`, { cwd: frontendDir });
+      // Build + push in the isolated, tokenless build sidecar.
+      frontendImage = await buildProjectImage({
+        kind: 'frontend',
+        projectId: project.project_uuid,
+        deploymentId,
+        contextDir: frontendDir,
+        image: frontendImage,
+      });
       await logStep(`Frontend image built: ${frontendImage}`);
-      await runCmd(`buildah push --storage-driver=vfs --tls-verify=false ${frontendImage}`, { cwd: frontendDir });
       await logStep(`Frontend image pushed: ${frontendImage}`);
     }
 
@@ -325,19 +417,18 @@ EXPOSE 80`
       if (!fs.existsSync(backendDir)) {
         const errMsg = 'Backend directory not found but backend deployment requested.';
         await logStep(errMsg, 'error');
-        return res.status(400).json({ error: errMsg });
+        throw new Error(errMsg);
       }
 
       const backendPackageJsonPath = path.join(backendDir, 'package.json');
       if (!fs.existsSync(backendPackageJsonPath)) {
         const errMsg = 'Backend directory does not contain a package.json file.';
         await logStep(errMsg, 'error');
-        return res.status(400).json({ error: errMsg });
+        throw new Error(errMsg);
       }
 
-      const backendPackageJson = JSON.parse(
-        fs.readFileSync(backendPackageJsonPath, 'utf8')
-      );
+      const backendPackageJson = readBoundedJson(backendPackageJsonPath, 'backend/package.json');
+      const backendDependencies = validateDependencies(backendPackageJson.dependencies);
 
       // Check if sCrypt contract compilation is needed
       let enableContracts = false;
@@ -350,7 +441,7 @@ EXPOSE 80`
       ) {
         const errMsg = `BSV Contract language not supported: ${deploymentInfo.contracts.language}`;
         await logStep(errMsg, 'error');
-        return res.status(400).json({ error: errMsg });
+        throw new Error(errMsg);
       }
 
       // Create supporting files for Docker build
@@ -363,14 +454,19 @@ EXPOSE 80`
       fs.writeFileSync(path.join(backendDir, 'tsconfig.json'), generateTsConfig());
       fs.writeFileSync(
         path.join(backendDir, 'package.json'),
-        JSON.stringify(generatePackageJson(backendPackageJson.dependencies as Record<string, string>), null, 2)
+        JSON.stringify(generatePackageJson(backendDependencies), null, 2)
       );
       fs.writeFileSync(path.join(backendDir, 'index.ts'), generateIndexTs(deploymentInfo));
 
-      // Build + push
-      await runCmd(`buildah build --storage-driver=vfs --isolation=chroot  -t ${backendImage} ${backendDir}`);
+      // Build + push in the isolated, tokenless build sidecar.
+      backendImage = await buildProjectImage({
+        kind: 'backend',
+        projectId: project.project_uuid,
+        deploymentId,
+        contextDir: backendDir,
+        image: backendImage,
+      });
       await logStep(`Backend image built: ${backendImage}`);
-      await runCmd(`buildah push --tls-verify=false --storage-driver=vfs ${backendImage}`);
       await logStep(`Backend image pushed: ${backendImage}`);
     }
 
@@ -436,6 +532,15 @@ description: A chart to deploy a CARS project
 
     if (backendEnabled && projectDbMode === 'shared') {
       const existingSecret = readProjectDbSecret(namespace, `${helmReleaseName}-db-connection`);
+      if (!existingSecret) {
+        const previousSuccessfulDeploy = await db('deploys')
+          .where({ project_id: project.id, status: 'succeeded' })
+          .whereNot({ id: deploy.id })
+          .first('id');
+        if (previousSuccessfulDeploy) {
+          throw new Error('Existing project database credentials are missing; refusing unsafe credential rotation');
+        }
+      }
       sharedDbCredentials = buildProjectDbCredentials(project.project_uuid, existingSecret);
       await ensureSharedProjectDatabases(sharedDbCredentials);
       await logStep(`Shared database credentials provisioned for ${project.project_uuid}`);
@@ -483,9 +588,12 @@ description: A chart to deploy a CARS project
 `
     );
 
+    if (backendEnabled && (!sharedDbCredentials || projectDbMode !== 'shared')) {
+      throw new Error('Secure shared database credentials were not provisioned');
+    }
     fs.writeFileSync(
       path.join(helmDir, 'templates', 'db-secrets.yaml'),
-      backendEnabled && projectDbMode === 'shared' && sharedDbCredentials
+      backendEnabled && sharedDbCredentials
         ? `{{- if .Values.backendImage }}
 apiVersion: v1
 kind: Secret
@@ -498,35 +606,10 @@ type: Opaque
 stringData:
   KNEX_URL: ${yamlString(sharedDbCredentials.knexUrl)}
   MONGO_URL: ${yamlString(sharedDbCredentials.mongoUrl)}
+  ADMIN_BEARER_TOKEN: ${yamlString(adminBearerTokenEnv)}
 {{- end }}
 `
-        : `{{- if .Values.backendImage }}
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {{ include "cars-project.fullname" . }}-db-connection
-  labels:
-    app: {{ include "cars-project.fullname" . }}
-    cars.bsv.io/db-mode: legacy-per-project
-type: Opaque
-stringData:
-  KNEX_URL: "mysql://projectUser:projectPass@{{ .Values.mysqlServiceName }}:3306/projectdb"
-  MONGO_URL: "mongodb://root:rootpassword@mongo-rs-0.{{ .Values.mongoServiceName }}.{{ .Release.Namespace }}.svc.cluster.local:27017,mongo-rs-1.{{ .Values.mongoServiceName }}.{{ .Release.Namespace }}.svc.cluster.local:27017/admin?replicaSet={{ .Values.mongoReplicaSetName }}&authSource=admin&readPreference=primaryPreferred"
-  MYSQL_ROOT_PASSWORD: "rootpassword"
-  MYSQL_DATABASE: "projectdb"
-  MYSQL_USER: "projectUser"
-  MYSQL_PASSWORD: "projectPass"
-  MYSQL_MONITOR_PASSWORD: "monitor-password"
-  MYSQL_PROXYADMIN_PASSWORD: "proxyadmin-password"
-  MYSQL_XTRABACKUP_PASSWORD: "xtrabackup-password"
-  MYSQL_CLUSTERCHECK_PASSWORD: "clustercheck-password"
-  MYSQL_REPLICATION_PASSWORD: "replication-password"
-  MYSQL_OPERATOR_PASSWORD: "operator-password"
-  MONGO_ROOT_USERNAME: "root"
-  MONGO_ROOT_PASSWORD: "rootpassword"
-  MONGO_RS_KEY: "${adminBearerTokenEnv}${adminBearerTokenEnv}${adminBearerTokenEnv}"
-{{- end }}
-`
+        : ''
     );
 
     //
@@ -555,6 +638,13 @@ spec:
       labels:
         app: {{ include "cars-project.fullname" . }}
     spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -584,7 +674,7 @@ spec:
       {{- if .Values.backendImage }}
       initContainers:
       - name: wait-for-mysql
-        image: busybox:1.36
+        image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
         command:
           - /bin/sh
           - -ec
@@ -592,8 +682,14 @@ spec:
             until nc -z {{ .Values.mysqlServiceName }} 3306; do
               sleep 5
             done
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          runAsNonRoot: true
+          runAsUser: 65532
       - name: wait-for-mongo
-        image: busybox:1.36
+        image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
         command:
           - /bin/sh
           - -ec
@@ -601,28 +697,41 @@ spec:
             until nc -z {{ .Values.mongoWaitHost }} 27017; do
               sleep 5
             done
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          runAsNonRoot: true
+          runAsUser: 65532
       {{- end }}
       containers:
       {{- if .Values.backendImage }}
       - name: backend
         image: {{ .Values.backendImage }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
         env:
         - name: HOSTING_URL
           value: "{{ .Values.ingressHostBackend }}"
         - name: REQUEST_LOGGING
-          value: "${requestLoggingEnv}"
+          value: ${yamlString(requestLoggingEnv)}
         - name: SAFE_REQUEST_LOGGING
-          value: "${safeRequestLoggingEnv}"
+          value: ${yamlString(safeRequestLoggingEnv)}
         - name: CARS_PUBLIC_DISCOVERY_ROOT
-          value: "${publicDiscoveryRootEnv}"
+          value: ${yamlString(publicDiscoveryRootEnv)}
         - name: CARS_BANNED_AD_DOMAINS
-          value: "${discoveryDenylistEnv}"
+          value: ${yamlString(discoveryDenylistEnv)}
         - name: CARS_BANNED_AD_CAPABILITIES
-          value: "${discoveryCapabilityDenylistEnv}"
+          value: ${yamlString(discoveryCapabilityDenylistEnv)}
         - name: GASP_SYNC
-          value: "${gaspSyncEnv}"
+          value: ${yamlString(gaspSyncEnv)}
         - name: NETWORK
-          value: "${overlayNetwork}"
+          value: ${yamlString(overlayNetwork)}
 ${propagationProviderEnv}        - name: KNEX_URL
           valueFrom:
             secretKeyRef:
@@ -645,15 +754,18 @@ ${propagationProviderEnv}        - name: KNEX_URL
           value: |-
             ${JSON.stringify(webUiConfigObj)}
         - name: ADMIN_BEARER_TOKEN
-          value: "${adminBearerTokenEnv}"
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "cars-project.fullname" . }}-db-connection
+              key: ADMIN_BEARER_TOKEN
         - name: LOG_TIME
-          value: "${logTimeEnv}"
+          value: ${yamlString(logTimeEnv)}
         - name: LOG_PREFIX
-          value: "${logPrefixEnv}"
+          value: ${yamlString(logPrefixEnv)}
         - name: SUPPRESS_DEFAULT_SYNC_ADVERTISEMENTS
-          value: "${suppressDefaultSyncAdvertisements}"
+          value: ${yamlString(suppressDefaultSyncAdvertisements)}
         - name: THROW_ON_BROADCAST_FAIL
-          value: "${throwOnBroadcastFailEnv}"
+          value: ${yamlString(throwOnBroadcastFailEnv)}
         - name: SYNC_CONFIG_JSON
           value: |-
             ${syncConfigJson}
@@ -679,28 +791,45 @@ ${propagationProviderEnv}        - name: KNEX_URL
         resources:
           requests:
             cpu: 100m  
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
       {{- end }}
       {{- if .Values.frontendImage }}
       - name: frontend
         image: {{ .Values.frontendImage }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 101
         ports:
-        - containerPort: 80
+        - containerPort: 8080
         readinessProbe:
           httpGet:
             path: /
-            port: 80
+            port: 8080
           initialDelaySeconds: 5
           periodSeconds: 10
         livenessProbe:
           httpGet:
             path: /
-            port: 80
+            port: 8080
           initialDelaySeconds: 15
           periodSeconds: 20
         resources:
           requests:
             cpu: 100m  
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
       {{- end }}
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 256Mi
 `
     );
 
@@ -758,6 +887,40 @@ spec:
 `
     );
 
+    fs.writeFileSync(
+      path.join(helmDir, 'templates', 'network-policy.yaml'),
+      `apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cars-project.fullname" . }}-ingress
+  labels:
+    app: {{ include "cars-project.fullname" . }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ include "cars-project.fullname" . }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cars-operator-system
+      ports:
+        {{- if .Values.backendImage }}
+        - protocol: TCP
+          port: 8080
+        {{- end }}
+        {{- if .Values.frontendImage }}
+        - protocol: TCP
+          port: 8080
+        {{- end }}
+`
+    );
+
     //
     // 14c) Service for our combined Pod
     //
@@ -785,7 +948,7 @@ spec:
   {{- end }}
   {{- if .Values.frontendImage }}
   - port: 80
-    targetPort: 80
+    targetPort: 8080
     protocol: TCP
     name: frontend
   {{- end }}
@@ -900,13 +1063,13 @@ metadata:
     app: mysql
 type: Opaque
 stringData:
-  root: "rootpassword"
-  xtrabackup: "xtrabackup-password"
-  monitor: "monitor-password"
-  proxyadmin: "proxyadmin-password"
-  clustercheck: "clustercheck-password"
-  operator: "operator-password"
-  replication: "replication-password"
+  root: "legacy-mode-disabled"
+  xtrabackup: "legacy-mode-disabled"
+  monitor: "legacy-mode-disabled"
+  proxyadmin: "legacy-mode-disabled"
+  clustercheck: "legacy-mode-disabled"
+  operator: "legacy-mode-disabled"
+  replication: "legacy-mode-disabled"
 ---
 apiVersion: pxc.percona.com/v1
 kind: PerconaXtraDBCluster
@@ -958,7 +1121,7 @@ spec:
             storage: {{ .Values.storage.mysqlSize | quote }}
   haproxy:
     enabled: true
-    image: percona/haproxy:2.8.18-1
+    image: docker.io/percona/haproxy:2.8.18-1@sha256:726b65930d86f7342eb6bce97a38b9af934c935345e4524afda6b65c2b3213b3
     size: 2
     resources:
       requests:
@@ -1016,7 +1179,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mysql-bootstrap
-          image: mysql:8.0
+          image: docker.io/library/mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
           command:
             - /bin/sh
             - -ec
@@ -1026,7 +1189,7 @@ spec:
               done
               mysql -h {{ .Values.mysqlServiceName }} -uroot -p"$MYSQL_ROOT_PASSWORD" <<'SQL'
               CREATE DATABASE IF NOT EXISTS projectdb;
-              CREATE USER IF NOT EXISTS 'projectUser'@'%' IDENTIFIED BY 'projectPass';
+              CREATE USER IF NOT EXISTS 'projectUser'@'%' IDENTIFIED BY 'legacy-mode-disabled';
               GRANT ALL PRIVILEGES ON projectdb.* TO 'projectUser'@'%';
               FLUSH PRIVILEGES;
               SQL
@@ -1082,7 +1245,7 @@ spec:
                   app: mongo-rs
       initContainers:
         - name: prepare-keyfile
-          image: busybox:1.36
+          image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
           command:
             - /bin/sh
             - -ec
@@ -1098,7 +1261,7 @@ spec:
               mountPath: /workdir
       containers:
         - name: mongo
-          image: mongo:6.0
+          image: docker.io/library/mongo:6.0@sha256:8b6d8f5bbedb25cb73517b65cf99f13aeb75ad5b157a56c479287a840bbad3ac
           env:
             - name: MONGO_INITDB_ROOT_USERNAME
               valueFrom:
@@ -1189,7 +1352,7 @@ spec:
           effect: "NoSchedule"
       containers:
         - name: mongo-arbiter
-          image: mongo:6.0
+          image: docker.io/library/mongo:6.0@sha256:8b6d8f5bbedb25cb73517b65cf99f13aeb75ad5b157a56c479287a840bbad3ac
           env:
             - name: MONGO_INITDB_ROOT_USERNAME
               valueFrom:
@@ -1215,7 +1378,7 @@ spec:
               readOnly: true
       initContainers:
         - name: prepare-keyfile
-          image: busybox:1.36
+          image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
           command:
             - /bin/sh
             - -ec
@@ -1273,7 +1436,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mongo-rs-init
-          image: mongo:6.0
+          image: docker.io/library/mongo:6.0@sha256:8b6d8f5bbedb25cb73517b65cf99f13aeb75ad5b157a56c479287a840bbad3ac
           command:
             - /bin/bash
             - -ec
@@ -1340,13 +1503,17 @@ spec:
 
     // 15) Deploy with Helm
     const helmTimeout = process.env.CARS_HELM_TIMEOUT || '20m';
-    await runCmd(
-      `helm upgrade --install ${helmReleaseName} ${helmDir} --namespace ${namespace} --atomic --timeout ${helmTimeout}`
-    );
+    await runCommand('helm', [
+      'upgrade', '--install', helmReleaseName, helmDir,
+      '--namespace', namespace, '--atomic', '--timeout', helmTimeout,
+    ], { stdio: 'inherit', timeoutMs: 45 * 60 * 1000 });
     await logStep(`Helm release ${helmReleaseName} deployed for project ${project.project_uuid}`);
 
     // 16) Wait for the main deployment to roll out
-    await runCmd(`kubectl rollout status deployment/${helmReleaseName}-deployment -n ${namespace} --timeout=${helmTimeout}`);
+    await runCommand('kubectl', [
+      'rollout', 'status', `deployment/${helmReleaseName}-deployment`,
+      '-n', namespace, `--timeout=${helmTimeout}`,
+    ], { stdio: 'inherit', timeoutMs: 45 * 60 * 1000 });
     await logStep(`Project ${project.project_uuid}, release ${deploymentId} rolled out successfully.`);
 
     // The release itself is the source of truth for the capabilities the node
@@ -1390,15 +1557,31 @@ spec:
       completionMessage += ` backendCustom=${project.backend_custom_domain}`;
     }
     await logStep(completionMessage);
+    await db('deploys').where({ id: deploy.id }).update({
+      status: 'succeeded',
+      error_message: null,
+      completed_at: db.fn.now(),
+    });
   } catch (error: any) {
-    // Handle errors gracefully, logging them and returning a 500
+    const publicMessage = 'CARS could not process this deployment';
+    const errorMessage = String(error?.message || 'Unknown deployment failure').slice(0, 2000);
     if (deploy && project) {
+      await db('deploys').where({ id: deploy.id }).update({
+        status: claimed ? 'failed' : deploy.status,
+        error_message: claimed ? errorMessage : deploy.error_message,
+        completed_at: claimed ? db.fn.now() : deploy.completed_at,
+      }).catch(() => undefined);
       await db('logs').insert({
         project_id: project.id,
         deploy_id: deploy.id,
-        message: `Error handling upload: ${error.message}`
-      });
-      logger.error(`Error handling upload: ${error.message}`, { deploymentId });
+        message: `Deployment failed: ${errorMessage}`
+      }).catch(() => undefined);
+      logger.error({
+        deploymentId,
+        projectId: project.project_uuid,
+        error: errorMessage,
+        alert: 'cars.deployment.failed',
+      }, 'CARS deployment failed');
 
       // Attempt to email project admins about the failure
       try {
@@ -1415,7 +1598,7 @@ A deployment for project "${project.name}" (ID: ${project.project_uuid}) has fai
 Deployment ID: ${deploy.deployment_uuid}
 
 Error Details:
-${error.message}
+${errorMessage}
 
 Originated by: ${(req as any).user?.identity_key} (${(req as any).user?.email})
 
@@ -1425,13 +1608,28 @@ Regards,
 CARS System`;
 
         await sendDeploymentFailureEmail(emails, project, body, subject);
-      } catch (ignore) {
-        // ignore any email-sending errors
+      } catch (emailError: any) {
+        logger.error({
+          deploymentId,
+          projectId: project.project_uuid,
+          error: emailError?.message || 'Unknown deployment notification failure',
+          alert: 'cars.deployment.failure_notification_failed',
+        }, 'CARS could not send a deployment failure notification');
       }
     }
 
     if (!res.headersSent) {
-      res.status(500).json({ error: `Error handling upload: ${error.message}` });
+      const status = errorMessage.includes('exceeds') ? 413 : 500;
+      res.status(status).json({
+        error: publicMessage,
+        code: 'CARS_DEPLOYMENT_FAILED',
+        requestId: (req as any).requestId,
+      });
+    }
+  } finally {
+    if (claimed) {
+      if (workspaceRoot) await fs.remove(workspaceRoot).catch(() => undefined);
+      await db('deploys').where({ id: deploy?.id }).update({ file_path: null }).catch(() => undefined);
     }
   }
 };

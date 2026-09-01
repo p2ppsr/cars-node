@@ -29,10 +29,8 @@ export interface ProjectDbCredentials {
 
 export function getProjectDbMode(): ProjectDbMode {
   const mode = process.env.CARS_PROJECT_DB_MODE || 'shared';
-  if (mode === 'shared' || mode === 'legacy-per-project') {
-    return mode;
-  }
-  throw new Error(`Invalid CARS_PROJECT_DB_MODE=${mode}; expected shared or legacy-per-project`);
+  if (mode === 'shared') return mode;
+  throw new Error(`Invalid CARS_PROJECT_DB_MODE=${mode}; legacy per-project databases were retired for security`);
 }
 
 export function getSharedDbConfig(): SharedDbConfig {
@@ -93,8 +91,10 @@ export function readProjectDbSecret(namespace: string, secretName: string): Reco
       result[key] = Buffer.from(String(value), 'base64').toString('utf8');
     }
     return result;
-  } catch {
-    return undefined;
+  } catch (error: any) {
+    const stderr = String(error?.stderr || error?.message || '');
+    if (/not found/i.test(stderr)) return undefined;
+    throw new Error(`Unable to read existing project database secret: ${stderr.slice(0, 500)}`);
   }
 }
 

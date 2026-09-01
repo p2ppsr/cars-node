@@ -162,6 +162,7 @@ test('control-plane image and deploy path pin and verify the production supply c
     /CARS_DISCOVERY_SKIP_PUBLIC_POSTFLIGHT=true[\s\S]+reconcile-users-public-discovery-root\.sh enable[\s\S]+evict-denied-discovery-records\.sh[\s\S]+reconcile-users-public-discovery-root\.sh enable/
   )
   assert.match(deployScript, /rollout lost node diversity/)
+  assert.match(deployScript, /IMAGE_DIGEST must be the sha256 digest/)
   assert.match(deployScript, /metadata\.deletionTimestamp.*spec\.containers\[0\]\.image.*status\.containerStatuses\[0\]\.ready/)
   assert.doesNotMatch(deployScript, /node -[ep]/)
   assert.match(publicRootScript, /cars-project-c6a84fc53bb50c34e179dcd861eb3964/)

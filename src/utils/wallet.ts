@@ -147,8 +147,13 @@ export async function checkAndFundProjectKeys(db: Knex, wallets: ProjectWallets)
                     }, 'Project key funded');
                 }
             }
-        } catch (e) {
-            continue
+        } catch (error: any) {
+            logger.error({
+                projectId: project.project_uuid,
+                network: project.network,
+                error: error?.message || 'Unknown project funding error',
+                alert: 'cars.cron.project_key.failed',
+            }, 'Failed to inspect or fund project key');
         }
     }
 }

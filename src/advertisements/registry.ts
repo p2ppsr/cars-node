@@ -37,7 +37,11 @@ export async function inspectProjectCapabilities(
   const attempts = Math.max(1, options.attempts ?? 24);
   const delayMs = Math.max(0, options.delayMs ?? 2_500);
   const requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? 5_000);
-  const request = options.request ?? ((url, requestOptions) => axios.get(url, requestOptions));
+  const request = options.request ?? ((url, requestOptions) => axios.get(url, {
+    ...requestOptions,
+    maxRedirects: 0,
+    maxContentLength: 256 * 1024,
+  }));
   const sleep = options.sleep ?? (delay => new Promise(resolve => setTimeout(resolve, delay)));
   let lastError: unknown;
 

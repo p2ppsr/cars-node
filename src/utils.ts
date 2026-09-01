@@ -143,26 +143,28 @@ const main = async () => {
 `;
 
   // For each Topic Manager in the deployment-info.json
+  let topicIndex = 0;
   for (const [name, pathToTm] of Object.entries(info.topicManagers || {})) {
-    const importName = `tm_${name}`;
+    const importName = `tm_${topicIndex++}`;
     // Adjust path so it’s importable from inside the container
     const pathToTmInContainer = pathToTm.replace('/backend', '');
-    imports += `import ${importName} from '${pathToTmInContainer}'\n`;
-    mainFunction += `  server.configureTopicManager('${name}', new ${importName}());\n`;
+    imports += `import ${importName} from ${JSON.stringify(pathToTmInContainer)}\n`;
+    mainFunction += `  server.configureTopicManager(${JSON.stringify(name)}, new ${importName}());\n`;
   }
 
   // For each Lookup Service in the deployment-info.json
+  let lookupIndex = 0;
   for (const [name, lsConfig] of Object.entries(info.lookupServices || {})) {
-    const importName = `lsf_${name}`;
+    const importName = `lsf_${lookupIndex++}`;
     const pathToLsInContainer = lsConfig.serviceFactory.replace('/backend', '');
-    imports += `import ${importName} from '${pathToLsInContainer}'\n`;
+    imports += `import ${importName} from ${JSON.stringify(pathToLsInContainer)}\n`;
     if (lsConfig.hydrateWith === 'mongo') {
-      mainFunction += `  server.configureLookupServiceWithMongo('${name}', ${importName});\n`;
+      mainFunction += `  server.configureLookupServiceWithMongo(${JSON.stringify(name)}, ${importName});\n`;
     } else if (lsConfig.hydrateWith === 'knex') {
-      mainFunction += `  server.configureLookupServiceWithKnex('${name}', ${importName});\n`;
+      mainFunction += `  server.configureLookupServiceWithKnex(${JSON.stringify(name)}, ${importName});\n`;
     } else {
       // If neither mongo nor knex is specified, assume a direct factory
-      mainFunction += `  server.configureLookupService('${name}', ${importName}());\n`;
+      mainFunction += `  server.configureLookupService(${JSON.stringify(name)}, ${importName}());\n`;
     }
   }
 
@@ -230,7 +232,7 @@ export function generatePackageJson(backendDependencies: Record<string, string>)
  * with optional contract artifacts if "enableContracts" is true.
  */
 export function generateDockerfile(enableContracts: boolean) {
-  let file = `FROM docker.io/node:22-alpine
+  let file = `FROM docker.io/node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
 WORKDIR /app
 COPY ./package.json .
 RUN npm i
@@ -238,7 +240,8 @@ COPY ./index.ts .
 COPY ./safe-access-logger.cjs .
 COPY ./tsconfig.json .
 COPY ./wait-for-services.sh /wait-for-services.sh
-RUN chmod +x /wait-for-services.sh`
+RUN chmod +x /wait-for-services.sh
+USER node`
   if (enableContracts) {
     file += `
 COPY ./artifacts ./artifacts`

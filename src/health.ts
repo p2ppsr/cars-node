@@ -1,8 +1,8 @@
-import { execFile, execSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import axios from 'axios';
 import type { Knex } from 'knex';
 import { getProjectDbMode, getSharedDbConfig } from './shared-db';
-import { auditProjectNamespaces } from './namespace-lifecycle';
+import { assertProjectId, auditProjectNamespaces } from './namespace-lifecycle';
 
 type HealthStatus = 'ok' | 'degraded' | 'error';
 
@@ -33,8 +33,12 @@ function releaseNameForProject(projectId: string) {
     return `cars-project-${projectId.substring(0, 24)}`;
 }
 
-function parseJsonCommand(command: string) {
-    return JSON.parse(execSync(command, { encoding: 'utf8' }));
+function kubectlJson(args: string[]) {
+    return JSON.parse(execFileSync('kubectl', args, {
+        encoding: 'utf8',
+        timeout: 30_000,
+        maxBuffer: 16 * 1024 * 1024,
+    }));
 }
 
 function kubernetesHealthTimeoutMs() {
@@ -119,6 +123,8 @@ async function fetchHttpHealth(url: string) {
     try {
         const response = await axios.get(url, {
             timeout: 5000,
+            maxRedirects: 0,
+            maxContentLength: 256 * 1024,
             validateStatus: () => true
         });
         return {
@@ -146,6 +152,7 @@ export async function collectSystemHealth(db: Knex, options: {
     teratestnetWalletReady?: boolean;
     migrationsComplete: boolean;
     namespaceLifecycleCheck?: (projectIds: string[]) => Promise<any>;
+    buildControllerCheck?: () => Promise<any>;
 }) {
     const checks = await Promise.all([
         runHealthCheck({
@@ -219,6 +226,26 @@ export async function collectSystemHealth(db: Knex, options: {
                     details: report
                 };
             }
+        }),
+        runHealthCheck({
+            name: 'buildController',
+            readinessCritical: true,
+            livenessCritical: false,
+            handler: async () => {
+                if (options.buildControllerCheck) return await options.buildControllerCheck();
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 3000);
+                try {
+                    const response = await fetch('http://127.0.0.1:7790/health/ready', { signal: controller.signal });
+                    const payload = await response.json().catch(() => ({}));
+                    return {
+                        status: response.ok && payload?.ready === true ? 'ok' : 'error',
+                        message: response.ok ? undefined : `Build controller returned HTTP ${response.status}`,
+                    };
+                } finally {
+                    clearTimeout(timeout);
+                }
+            }
         })
     ]);
 
@@ -234,16 +261,17 @@ export async function collectSystemHealth(db: Knex, options: {
 export async function collectProjectHealth(projectId: string, options: {
     includeRemoteBackendHealth?: boolean;
 } = {}) {
+    assertProjectId(projectId);
     const namespace = namespaceForProject(projectId);
     const releaseName = releaseNameForProject(projectId);
     const projectDbMode = getProjectDbMode();
     const sharedDbConfig = getSharedDbConfig();
-    const resources = parseJsonCommand(`kubectl get deploy,sts,svc,pdb,hpa,ingress -n ${namespace} -o json`);
-    const pods = parseJsonCommand(`kubectl get pods -n ${namespace} -o json`);
+    const resources = kubectlJson(['get', 'deploy,sts,svc,pdb,hpa,ingress', '-n', namespace, '-o', 'json']);
+    const pods = kubectlJson(['get', 'pods', '-n', namespace, '-o', 'json']);
     let pxcResources: any[] = [];
     if (projectDbMode === 'legacy-per-project') {
         try {
-            pxcResources = parseJsonCommand(`kubectl get pxc -n ${namespace} -o json`).items || [];
+            pxcResources = kubectlJson(['get', 'pxc', '-n', namespace, '-o', 'json']).items || [];
         } catch {
             pxcResources = [];
         }
@@ -253,17 +281,17 @@ export async function collectProjectHealth(projectId: string, options: {
     let sharedMongoArbiter: any | undefined;
     if (projectDbMode === 'shared') {
         try {
-            sharedPxc = parseJsonCommand(`kubectl get pxc shared-mysql -n ${sharedDbConfig.namespace} -o json`);
+            sharedPxc = kubectlJson(['get', 'pxc', 'shared-mysql', '-n', sharedDbConfig.namespace, '-o', 'json']);
         } catch {
             sharedPxc = undefined;
         }
         try {
-            sharedMongoStatefulSet = parseJsonCommand(`kubectl get sts shared-mongo -n ${sharedDbConfig.namespace} -o json`);
+            sharedMongoStatefulSet = kubectlJson(['get', 'sts', 'shared-mongo', '-n', sharedDbConfig.namespace, '-o', 'json']);
         } catch {
             sharedMongoStatefulSet = undefined;
         }
         try {
-            sharedMongoArbiter = parseJsonCommand(`kubectl get deploy shared-mongo-arbiter -n ${sharedDbConfig.namespace} -o json`);
+            sharedMongoArbiter = kubectlJson(['get', 'deploy', 'shared-mongo-arbiter', '-n', sharedDbConfig.namespace, '-o', 'json']);
         } catch {
             sharedMongoArbiter = undefined;
         }
@@ -281,7 +309,7 @@ export async function collectProjectHealth(projectId: string, options: {
     let dbSecret: any | undefined;
     if (projectDbMode === 'shared') {
         try {
-            dbSecret = parseJsonCommand(`kubectl get secret ${releaseName}-db-connection -n ${namespace} -o json`);
+            dbSecret = kubectlJson(['get', 'secret', `${releaseName}-db-connection`, '-n', namespace, '-o', 'json']);
         } catch {
             dbSecret = undefined;
         }
@@ -497,8 +525,12 @@ export async function collectProjectHealth(projectId: string, options: {
                         details: { backendHost: backendHost || null }
                     };
                 }
-                const live = await fetchHttpHealth(`https://${backendHost}/health/live`);
-                const ready = await fetchHttpHealth(`https://${backendHost}/health/ready`);
+                const live = await fetchHttpHealth(
+                    `http://${releaseName}-service.${namespace}.svc.cluster.local:8080/health/live`
+                );
+                const ready = await fetchHttpHealth(
+                    `http://${releaseName}-service.${namespace}.svc.cluster.local:8080/health/ready`
+                );
                 return {
                     status: live.status === 'ok' && ready.status === 'ok' ? 'ok' : 'error',
                     details: {

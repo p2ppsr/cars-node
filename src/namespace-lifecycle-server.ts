@@ -1,15 +1,33 @@
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import 'express-async-errors';
 import express from 'express';
 import logger from './logger';
 import { assertProjectId } from './namespace-lifecycle';
 
-const port = Number(process.env.CARS_NAMESPACE_LIFECYCLE_PORT || 7780);
 const serviceAccountName = process.env.CARS_RUNTIME_SERVICE_ACCOUNT || 'cars-operator-node';
 const serviceAccountNamespace = process.env.CARS_RUNTIME_SERVICE_ACCOUNT_NAMESPACE || 'cars-operator-system';
 const roleName = process.env.CARS_PROJECT_RUNTIME_ROLE || 'cars-project-runtime';
 const bindingName = process.env.CARS_PROJECT_RUNTIME_BINDING || 'cars-project-runtime';
 const namespacePrefix = 'cars-project-';
+const requiredNamespaceLabels = {
+  'app.kubernetes.io/managed-by': 'cars-namespace-lifecycle',
+  'cars.bsv.io/managed': 'true',
+  'pod-security.kubernetes.io/enforce': 'baseline',
+  'pod-security.kubernetes.io/enforce-version': 'v1.34',
+  'pod-security.kubernetes.io/audit': 'restricted',
+  'pod-security.kubernetes.io/audit-version': 'v1.34',
+  'pod-security.kubernetes.io/warn': 'restricted',
+  'pod-security.kubernetes.io/warn-version': 'v1.34',
+};
+
+function listenPort(): number {
+  const value = Number.parseInt(process.env.CARS_NAMESPACE_LIFECYCLE_LISTEN_PORT || '7780', 10);
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new Error('CARS_NAMESPACE_LIFECYCLE_LISTEN_PORT must be a valid TCP port');
+  }
+  return value;
+}
 
 function token(): string {
   const value = process.env.CARS_NAMESPACE_LIFECYCLE_TOKEN;
@@ -36,12 +54,27 @@ function runKubectl(args: string[], input?: object, timeoutMs = 120000): Promise
     const child = spawn('kubectl', args, { stdio: ['pipe', 'pipe', 'pipe'] });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let outputBytes = 0;
+    let settled = false;
     const timeout = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
-    child.stdout.on('data', chunk => stdout.push(Buffer.from(chunk)));
-    child.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)));
+    const collect = (target: Buffer[], chunk: Buffer) => {
+      const value = Buffer.from(chunk);
+      outputBytes += value.length;
+      if (outputBytes > 16 * 1024 * 1024) {
+        settled = true;
+        child.kill('SIGKILL');
+        reject(new Error(`kubectl ${args[0]} output exceeded 16 MiB`));
+        return;
+      }
+      target.push(value);
+    };
+    child.stdout.on('data', chunk => collect(stdout, chunk));
+    child.stderr.on('data', chunk => collect(stderr, chunk));
     child.once('error', reject);
     child.once('exit', (code, signal) => {
       clearTimeout(timeout);
+      if (settled) return;
+      settled = true;
       if (code === 0) {
         resolve(Buffer.concat(stdout).toString('utf8'));
         return;
@@ -61,8 +94,7 @@ function namespaceDocument(projectId: string) {
     metadata: {
       name: namespaceName(projectId),
       labels: {
-        'app.kubernetes.io/managed-by': 'cars-namespace-lifecycle',
-        'cars.bsv.io/managed': 'true',
+        ...requiredNamespaceLabels,
         'cars.bsv.io/project-id': projectId,
       },
     },
@@ -103,6 +135,9 @@ function bindingIsValid(binding: any, projectId: string): boolean {
   const subjects = binding?.subjects || [];
   return binding?.metadata?.name === bindingName &&
     binding?.metadata?.namespace === namespaceName(projectId) &&
+    binding?.metadata?.labels?.['app.kubernetes.io/managed-by'] === 'cars-namespace-lifecycle' &&
+    binding?.metadata?.labels?.['cars.bsv.io/managed'] === 'true' &&
+    binding?.metadata?.labels?.['cars.bsv.io/project-id'] === projectId &&
     binding?.roleRef?.apiGroup === 'rbac.authorization.k8s.io' &&
     binding?.roleRef?.kind === 'ClusterRole' &&
     binding?.roleRef?.name === roleName &&
@@ -110,6 +145,13 @@ function bindingIsValid(binding: any, projectId: string): boolean {
     subjects[0]?.kind === 'ServiceAccount' &&
     subjects[0]?.name === serviceAccountName &&
     subjects[0]?.namespace === serviceAccountNamespace;
+}
+
+function namespaceIsValid(namespace: any, projectId: string): boolean {
+  const labels = namespace?.metadata?.labels || {};
+  return namespace?.metadata?.name === namespaceName(projectId) &&
+    labels['cars.bsv.io/project-id'] === projectId &&
+    Object.entries(requiredNamespaceLabels).every(([key, value]) => labels[key] === value);
 }
 
 async function ensure(projectId: string): Promise<void> {
@@ -139,31 +181,40 @@ async function audit(projectIds: string[]) {
   }));
   const namespaceList = JSON.parse(await runKubectl(['get', 'namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
   const bindingList = JSON.parse(await runKubectl(['get', 'rolebindings', '--all-namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
-  const managed = new Set<string>((namespaceList.items || []).map((item: any) => item?.metadata?.name).filter(Boolean));
+  const namespaceByName = new Map<string, any>((namespaceList.items || [])
+    .map((item: any) => [item?.metadata?.name, item] as const)
+    .filter(([name]) => Boolean(name)));
+  const managed = new Set<string>(namespaceByName.keys());
   const bindingByNamespace = new Map<string, any>();
   for (const binding of bindingList.items || []) {
     if (binding?.metadata?.name === bindingName) bindingByNamespace.set(binding.metadata.namespace, binding);
   }
   const missingNamespaces = [...expected].filter(name => !managed.has(name)).sort();
   const orphanNamespaces = [...managed].filter(name => !expected.has(name)).sort();
+  const invalidNamespaces = [...expected]
+    .filter(name => managed.has(name))
+    .filter(name => !namespaceIsValid(namespaceByName.get(name), name.slice(namespacePrefix.length)))
+    .sort();
   const invalidBindings = [...expected]
     .filter(name => managed.has(name))
     .filter(name => !bindingIsValid(bindingByNamespace.get(name), name.slice(namespacePrefix.length)))
     .sort();
   return {
-    status: missingNamespaces.length || orphanNamespaces.length || invalidBindings.length ? 'error' : 'ok',
+    status: missingNamespaces.length || orphanNamespaces.length || invalidNamespaces.length || invalidBindings.length ? 'error' : 'ok',
     expectedProjects: expected.size,
     managedNamespaces: managed.size,
     missingNamespaces,
     orphanNamespaces,
+    invalidNamespaces,
     invalidBindings,
   };
 }
 
-export { namespaceDocument, bindingDocument, bindingIsValid };
+export { namespaceDocument, bindingDocument, bindingIsValid, namespaceIsValid };
 
 async function main() {
   token();
+  const port = listenPort();
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '256kb' }));
@@ -171,11 +222,22 @@ async function main() {
   app.get('/health/live', (_req, res) => res.json({ status: 'ok', live: true }));
   app.get('/health/ready', async (_req, res) => {
     try {
-      const allowed = (await runKubectl(['auth', 'can-i', 'create', 'namespaces'])).trim();
-      if (allowed !== 'yes') throw new Error('ServiceAccount cannot create namespaces');
+      const checks = [
+        ['create', 'namespaces'],
+        ['patch', 'namespaces'],
+        ['delete', 'namespaces'],
+        ['list', 'namespaces'],
+        ['create', 'rolebindings', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+        ['get', 'rolebindings', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+        ['patch', 'rolebindings', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+        ['list', 'rolebindings', '--all-namespaces'],
+      ];
+      for (const check of checks) {
+        const allowed = (await runKubectl(['auth', 'can-i', ...check])).trim();
+        if (allowed !== 'yes') throw new Error(`ServiceAccount cannot ${check[0]} ${check[1]}`);
+      }
       res.json({ status: 'ok', ready: true });
-    } catch (error: any) {
-      logger.error({ error: error.message, alert: 'cars.namespace_lifecycle.not_ready' }, 'Namespace lifecycle readiness failed');
+    } catch {
       res.status(503).json({ status: 'error', ready: false });
     }
   });
@@ -203,7 +265,10 @@ async function main() {
   });
   app.post('/v1/audit', async (req, res) => {
     try {
-      if (!Array.isArray(req.body?.projectIds) || req.body.projectIds.length > 10000) {
+      if (
+        !Array.isArray(req.body?.projectIds) || req.body.projectIds.length > 10000 ||
+        req.body.projectIds.some((projectId: unknown) => typeof projectId !== 'string')
+      ) {
         return res.status(400).json({ error: 'projectIds must be an array' });
       }
       const report = await audit(req.body.projectIds);

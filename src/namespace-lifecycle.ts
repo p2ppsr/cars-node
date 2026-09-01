@@ -8,6 +8,7 @@ export interface NamespaceAudit {
   managedNamespaces: number;
   missingNamespaces: string[];
   orphanNamespaces: string[];
+  invalidNamespaces: string[];
   invalidBindings: string[];
 }
 

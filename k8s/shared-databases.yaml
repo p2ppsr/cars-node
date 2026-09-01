@@ -84,7 +84,7 @@ spec:
             storage: 200Gi
   haproxy:
     enabled: true
-    image: percona/haproxy:2.8.18-1
+    image: docker.io/percona/haproxy:2.8.18-1@sha256:726b65930d86f7342eb6bce97a38b9af934c935345e4524afda6b65c2b3213b3
     envVarsSecret: shared-mysql-env-vars-haproxy
     size: 2
     resources:
@@ -168,7 +168,7 @@ spec:
                   app: shared-mongo
       initContainers:
         - name: prepare-keyfile
-          image: busybox:1.36
+          image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
           command: ["/bin/sh", "-ec", "cp /secret/keyfile /workdir/keyfile && chmod 600 /workdir/keyfile && chown 999:999 /workdir/keyfile"]
           volumeMounts:
             - name: mongo-keyfile-secret
@@ -178,7 +178,7 @@ spec:
               mountPath: /workdir
       containers:
         - name: mongo
-          image: mongo:6.0
+          image: docker.io/library/mongo:6.0@sha256:8b6d8f5bbedb25cb73517b65cf99f13aeb75ad5b157a56c479287a840bbad3ac
           args: ["--bind_ip_all", "--replSet", "rs0", "--auth", "--keyFile=/etc/mongo-keyfile/keyfile"]
           ports:
             - containerPort: 27017
@@ -245,7 +245,7 @@ spec:
           effect: "NoSchedule"
       initContainers:
         - name: prepare-keyfile
-          image: busybox:1.36
+          image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
           command: ["/bin/sh", "-ec", "cp /secret/keyfile /workdir/keyfile && chmod 600 /workdir/keyfile && chown 999:999 /workdir/keyfile"]
           volumeMounts:
             - name: mongo-keyfile-secret
@@ -255,7 +255,7 @@ spec:
               mountPath: /workdir
       containers:
         - name: mongo
-          image: mongo:6.0
+          image: docker.io/library/mongo:6.0@sha256:8b6d8f5bbedb25cb73517b65cf99f13aeb75ad5b157a56c479287a840bbad3ac
           args: ["--bind_ip_all", "--replSet", "rs0", "--auth", "--keyFile=/etc/mongo-keyfile/keyfile"]
           ports:
             - containerPort: 27017
@@ -309,7 +309,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mongo-rs-init
-          image: mongo:6.0
+          image: docker.io/library/mongo:6.0@sha256:8b6d8f5bbedb25cb73517b65cf99f13aeb75ad5b157a56c479287a840bbad3ac
           command:
             - /bin/bash
             - -ec

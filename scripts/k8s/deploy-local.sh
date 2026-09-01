@@ -17,6 +17,11 @@ fi
 registry_pull="${REGISTRY_PULL:-registry.cars-operator-system.svc.cluster.local:5000}"
 kubectl_cmd="${KUBECTL:-kubectl}"
 image="${registry_pull}/cars-node:${IMAGE_TAG}"
+[[ "${IMAGE_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+  echo "IMAGE_DIGEST must be the sha256 digest returned by the release build" >&2
+  exit 2
+}
+image="${image}@${IMAGE_DIGEST}"
 [[ "${SOURCE_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || {
   echo "SOURCE_SHA must be a full lowercase Git commit SHA" >&2
   exit 2
@@ -45,10 +50,10 @@ check_cars_health /health/live live
 check_cars_health /health/ready ready
 
 rendered_advertisement_manifest="$(sed \
-  "s|image: registry.cars-operator-system.svc.cluster.local:5000/cars-node:latest|image: ${image}|" \
+  "s|image: registry.cars-operator-system.svc.cluster.local:5000/cars-node:RELEASE_IMAGE_REQUIRED|image: ${image}|" \
   k8s/advertisement-controller.yaml)"
 grep -Fq "image: ${image}" <<<"${rendered_advertisement_manifest}"
-! grep -Fq 'image: registry.cars-operator-system.svc.cluster.local:5000/cars-node:latest' \
+! grep -Fq 'image: registry.cars-operator-system.svc.cluster.local:5000/cars-node:RELEASE_IMAGE_REQUIRED' \
   <<<"${rendered_advertisement_manifest}"
 printf '%s\n' "${rendered_advertisement_manifest}" | "${kubectl_cmd}" apply -f -
 "${kubectl_cmd}" -n cars-operator-system annotate deployment/cars-advertisement-controller \
