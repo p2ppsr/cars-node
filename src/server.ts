@@ -143,10 +143,7 @@ async function main() {
             .filter(Boolean)
     );
 
-    app.use(helmet({
-        contentSecurityPolicy: false,
-        crossOriginResourcePolicy: false,
-    }));
+    app.use(helmet());
     app.use((req, res, next) => {
         const id = requestId(req);
         (req as any).requestId = id;

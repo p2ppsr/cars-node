@@ -37,6 +37,7 @@ import { inspectProjectCapabilities, replaceProjectCapabilities } from '../adver
 import { buildProjectIngressTls } from '../ingress-tls';
 import { isPublicDiscoveryRoot } from '../public-discovery-root';
 import { ensureProjectNamespace } from '../namespace-lifecycle';
+import { deploymentWorkspaceRoot } from '../deployment-workspace';
 import {
   DEFAULT_DISCOVERY_DENYLIST,
   serializeDiscoveryCapabilityDenylist,
@@ -61,14 +62,19 @@ function yamlString(value: string) {
 }
 
 function readBoundedJson(file: string, label: string, maxBytes = 1024 * 1024): any {
-  const stat = fs.statSync(file);
-  if (!stat.isFile() || stat.size < 1 || stat.size > maxBytes) {
-    throw new Error(`${label} must be a regular JSON file no larger than ${maxBytes} bytes`);
-  }
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    throw new Error(`${label} is not valid JSON`);
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size < 1 || stat.size > maxBytes) {
+      throw new Error(`${label} must be a regular JSON file no larger than ${maxBytes} bytes`);
+    }
+    try {
+      return JSON.parse(fs.readFileSync(descriptor, 'utf8'));
+    } catch {
+      throw new Error(`${label} is not valid JSON`);
+    }
+  } finally {
+    fs.closeSync(descriptor);
   }
 }
 
@@ -150,8 +156,9 @@ export default async (req: Request, res: Response) => {
     mainnetWallet: WalletInterface;
   } = req as any;
   const { deploymentId, signature } = req.params;
-  const filePath = path.join('/tmp', `artifact_${deploymentId}.tgz`);
-  const uploadDir = path.join('/tmp', `build_${deploymentId}`);
+  let workspaceRoot: string | undefined;
+  let filePath: string | undefined;
+  let uploadDir: string | undefined;
   let claimed = false;
 
   // Helper function to log steps to DB logs and logger
@@ -210,6 +217,10 @@ export default async (req: Request, res: Response) => {
       counterparty: 'self'
     });
     if (!valid) return res.status(401).json({ error: 'Invalid signature' });
+
+    workspaceRoot = deploymentWorkspaceRoot(project.project_uuid, deploymentId);
+    filePath = path.join(workspaceRoot, 'artifact.tgz');
+    uploadDir = path.join(workspaceRoot, 'source');
 
     const contentLength = req.header('content-length');
     if (contentLength) {
@@ -1617,10 +1628,7 @@ CARS System`;
     }
   } finally {
     if (claimed) {
-      await Promise.all([
-        fs.remove(filePath).catch(() => undefined),
-        fs.remove(uploadDir).catch(() => undefined),
-      ]);
+      if (workspaceRoot) await fs.remove(workspaceRoot).catch(() => undefined);
       await db('deploys').where({ id: deploy?.id }).update({ file_path: null }).catch(() => undefined);
     }
   }

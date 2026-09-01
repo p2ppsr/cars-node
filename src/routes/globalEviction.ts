@@ -135,7 +135,10 @@ async function claimTakedown(db: any, operationId: string): Promise<'claimed' | 
 export default async (req, res) => {
   let operationId: string | undefined;
   try {
-    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || []);
+    if (!Buffer.isBuffer(req.body)) {
+      return res.status(415).json({ error: 'Takedown notices must use application/octet-stream' });
+    }
+    const body: Buffer = req.body;
     if (body.length < 1 || body.length > 2 * 1024 * 1024) {
       return res.status(413).json({ error: 'Takedown notice is too large' });
     }

@@ -5,6 +5,7 @@ const test = require('node:test');
 
 const { authorizeTakedown, takedownOperationId } = require('../dist/src/routes/globalEviction.js');
 const { KnexPaymentReplayStore } = require('../dist/src/payment-replay.js');
+const { deploymentWorkspaceRoot } = require('../dist/src/deployment-workspace.js');
 
 const officers = [`02${'11'.repeat(32)}`, `03${'22'.repeat(32)}`];
 const authority = [{ name: 'court', authorityRequiredSignatures: 2, officerIdentityKeys: officers }];
@@ -82,4 +83,23 @@ test('release source removes shell builds and separates the build controller', (
   assert.match(builder, /--cap-drop=all/);
   assert.match(builder, /--digestfile/);
   assert.match(builder, /@\$\{digest\}/);
+});
+
+test('deployment scratch paths are opaque and bound to both tenant identifiers', () => {
+  const previous = process.env.CARS_BUILD_CONTROLLER_TOKEN;
+  process.env.CARS_BUILD_CONTROLLER_TOKEN = 'workspace-test-secret-that-is-long-enough';
+  try {
+    const projectId = '11'.repeat(16);
+    const deploymentId = '22'.repeat(16);
+    const root = deploymentWorkspaceRoot(projectId, deploymentId);
+    assert.match(root, /^\/tmp\/cars-workspace-[a-f0-9]{64}$/);
+    assert.doesNotMatch(root, new RegExp(projectId));
+    assert.doesNotMatch(root, new RegExp(deploymentId));
+    assert.notEqual(root, deploymentWorkspaceRoot('33'.repeat(16), deploymentId));
+    assert.notEqual(root, deploymentWorkspaceRoot(projectId, '44'.repeat(16)));
+    assert.throws(() => deploymentWorkspaceRoot('../tenant', deploymentId), /Invalid project id/);
+  } finally {
+    if (previous === undefined) delete process.env.CARS_BUILD_CONTROLLER_TOKEN;
+    else process.env.CARS_BUILD_CONTROLLER_TOKEN = previous;
+  }
 });

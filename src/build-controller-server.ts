@@ -3,9 +3,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import 'express-async-errors';
 import express from 'express';
+import { rateLimit } from 'express-rate-limit';
 import logger from './logger';
 import { runCommand } from './process';
 import type { BuildKind } from './build-controller';
+import { deploymentWorkspaceRoot } from './deployment-workspace';
 
 const projectIdPattern = /^[a-f0-9]{32}$/;
 const deploymentIdPattern = /^[a-f0-9]{32}$/;
@@ -61,12 +63,13 @@ async function validateRequest(body: any): Promise<{
   if (kind !== 'frontend' && kind !== 'backend') throw new Error('Invalid build kind');
   if (!projectIdPattern.test(projectId)) throw new Error('Invalid project id');
   if (!deploymentIdPattern.test(deploymentId)) throw new Error('Invalid deployment id');
-  const expectedDir = `/tmp/build_${deploymentId}/${kind}`;
-  const resolved = await import('fs/promises').then(fs => fs.realpath(contextDir));
-  if (contextDir !== expectedDir || resolved !== expectedDir) throw new Error('Invalid build context');
+  const expectedDir = path.join(deploymentWorkspaceRoot(projectId, deploymentId), 'source', kind);
+  if (contextDir !== expectedDir) throw new Error('Invalid build context');
+  const resolved = await fs.realpath(expectedDir);
+  if (resolved !== expectedDir) throw new Error('Invalid build context');
   const expectedImage = `${registry()}/cars-project-${projectId}/${kind}:${deploymentId}`;
   if (image !== expectedImage) throw new Error('Invalid destination image');
-  return { kind, projectId, deploymentId, contextDir, image };
+  return { kind, projectId, deploymentId, contextDir: expectedDir, image: expectedImage };
 }
 
 async function main() {
@@ -75,6 +78,13 @@ async function main() {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '32kb' }));
+  app.use(rateLimit({
+    windowMs: 60 * 1000,
+    limit: 60,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: 'Too many build-controller requests' },
+  }));
   app.get('/health/live', (_req, res) => res.json({ status: 'ok', live: true }));
   app.get('/health/ready', async (_req, res) => {
     try {
@@ -101,10 +111,10 @@ async function main() {
       ], { cwd: build.contextDir, stdio: 'inherit', timeoutMs: 90 * 60 * 1000 });
       await runCommand('buildah', [
         'push', '--storage-driver=vfs', '--tls-verify=false',
-        '--digestfile', `/tmp/push-digest-${build.deploymentId}-${build.kind}`,
+        '--digestfile', path.join(deploymentWorkspaceRoot(build.projectId, build.deploymentId), `push-${build.kind}.digest`),
         build.image,
       ], { cwd: build.contextDir, stdio: 'inherit', timeoutMs: 30 * 60 * 1000 });
-      const digestPath = `/tmp/push-digest-${build.deploymentId}-${build.kind}`;
+      const digestPath = path.join(deploymentWorkspaceRoot(build.projectId, build.deploymentId), `push-${build.kind}.digest`);
       const digest = (await fs.readFile(digestPath, 'utf8')).trim();
       await fs.rm(digestPath, { force: true });
       if (!/^sha256:[a-f0-9]{64}$/.test(digest)) {
@@ -124,7 +134,8 @@ async function main() {
       res.status(500).json({ error: 'Image build failed' });
     } finally {
       if (build?.image) {
-        await fs.rm(`/tmp/push-digest-${build.deploymentId}-${build.kind}`, { force: true }).catch(() => undefined);
+        const digestPath = path.join(deploymentWorkspaceRoot(build.projectId, build.deploymentId), `push-${build.kind}.digest`);
+        await fs.rm(digestPath, { force: true }).catch(() => undefined);
         await runCommand('buildah', [
           'rmi', '--storage-driver=vfs', build.image,
         ], { timeoutMs: 2 * 60 * 1000, maxOutputBytes: 256 * 1024 }).catch(error => {
