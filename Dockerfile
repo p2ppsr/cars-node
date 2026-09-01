@@ -1,4 +1,4 @@
-ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.2@sha256:6671da220c2a55976b4f10f6edfe21da3fcba86a81d495ce1ecd5b1129a97063
+ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.2@sha256:836f1db7d8a21dc26d63f6c4ef930cde3f2a69f3e9f4cae9cc6751ec7b7a40dc
 
 FROM ${BUILDAH_IMAGE} AS tools
 
