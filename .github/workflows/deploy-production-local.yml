@@ -63,7 +63,7 @@ jobs:
         env:
           TRIVY_INSECURE: "true"
         with:
-          image-ref: ${{ steps.build.outputs.image }}
+          image-ref: ${{ steps.build.outputs.scan_image }}
           format: table
           exit-code: "1"
           ignore-unfixed: true
