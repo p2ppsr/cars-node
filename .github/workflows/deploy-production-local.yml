@@ -1,4 +1,4 @@
-name: Deploy Production Local
+name: Build Production Image
 
 on:
   workflow_dispatch:
@@ -9,20 +9,19 @@ on:
         type: string
 
 concurrency:
-  group: cars-node-prod-local
+  group: cars-node-production-image
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  deploy:
+  build:
     runs-on:
       - self-hosted
       - evans-creek-local-deploy
       - linux-amd64
       - docker
-      - kubectl
       - local-registry
     environment: production
     steps:
@@ -39,18 +38,28 @@ jobs:
           git fetch --no-tags origin master
           git merge-base --is-ancestor "${SOURCE_SHA}" origin/master
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
       - name: Build and push image
         id: build
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: scripts/k8s/build-local-image.sh
 
-      - name: Deploy to local Kubernetes
-        env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          IMAGE_TAG: ${{ steps.build.outputs.image_tag }}
-        run: scripts/k8s/deploy-local.sh
+      - name: Record immutable release
+        run: |
+          test "$(jq -r .source_sha release-manifest.json)" = "${{ inputs.source_sha }}"
+          test "$(jq -r .image release-manifest.json)" = "${{ steps.build.outputs.image }}"
+          {
+            echo '## CARS production image'
+            echo ''
+            echo '- Source: `${{ inputs.source_sha }}`'
+            echo '- Image: `${{ steps.build.outputs.image }}`'
+            echo ''
+            echo 'Deployment is intentionally owned by the network-ops control plane; this build runner has no Kubernetes credential.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cars-production-release-${{ inputs.source_sha }}
+          path: release-manifest.json
+          if-no-files-found: error
+          retention-days: 30
