@@ -49,10 +49,14 @@ jobs:
 
       - name: Audit production dependencies
         run: |
-          docker run --rm --platform linux/amd64 \
-            --volume "$PWD:/workspace:ro" --workdir /workspace \
-            "$RELEASE_NODE_IMAGE" \
-            npm audit --omit=dev --audit-level=high
+          tar --create --file=- package.json package-lock.json | \
+            docker run --rm --interactive --platform linux/amd64 \
+              "$RELEASE_NODE_IMAGE" sh -ceu '
+                mkdir /workspace
+                tar --extract --file=- --directory=/workspace
+                cd /workspace
+                npm audit --omit=dev --audit-level=high
+              '
 
       - name: Scan production image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -68,10 +72,14 @@ jobs:
 
       - name: Generate production dependency SBOM
         run: |
-          docker run --rm --platform linux/amd64 \
-            --volume "$PWD:/workspace:ro" --workdir /workspace \
-            "$RELEASE_NODE_IMAGE" \
-            npm sbom --omit=dev --sbom-format=cyclonedx > release-sbom.cdx.json
+          tar --create --file=- package.json package-lock.json | \
+            docker run --rm --interactive --platform linux/amd64 \
+              "$RELEASE_NODE_IMAGE" sh -ceu '
+                mkdir /workspace
+                tar --extract --file=- --directory=/workspace
+                cd /workspace
+                npm sbom --package-lock-only --omit=dev --sbom-format=cyclonedx
+              ' > release-sbom.cdx.json
           jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' release-sbom.cdx.json >/dev/null
 
       - name: Record immutable release
