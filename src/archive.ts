@@ -61,7 +61,6 @@ export async function extractTarGz(
       if (header.type !== 'file' && header.type !== 'directory') {
         throw new Error(`Archive entry type is not allowed: ${header.type || 'unknown'}`);
       }
-      const target = safeArchivePath(destination, header.name);
       const declaredSize = Number(header.size || 0);
       if (!Number.isSafeInteger(declaredSize) || declaredSize < 0) {
         throw new Error(`Archive entry has an invalid size: ${header.name}`);
@@ -70,6 +69,17 @@ export async function extractTarGz(
       if (expandedBytes > limits.maxExpandedBytes) {
         throw new Error(`Archive expands beyond ${limits.maxExpandedBytes} bytes`);
       }
+
+      // Common tar producers emit a zero-byte directory entry for the archive
+      // root. It creates no filesystem object and is safe to ignore, but must
+      // never make an identically named file target the extraction root.
+      if (header.type === 'directory' && (header.name === '.' || header.name === './')) {
+        if (declaredSize !== 0) throw new Error('Archive root marker must be empty');
+        for await (const _chunk of stream) { /* root marker has no body */ }
+        continue;
+      }
+
+      const target = safeArchivePath(destination, header.name);
 
       if (header.type === 'directory') {
         await fs.ensureDir(target, 0o755);
