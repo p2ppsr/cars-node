@@ -20,6 +20,7 @@
         "seed:advertisements": "node dist/src/tools/seed-advertisement-registry.js",
         "revoke:legacy-advertisements": "node dist/src/tools/revoke-legacy-advertisements.js",
         "start:advertisements": "node dist/src/advertisement-controller.js",
+        "start:namespace-lifecycle": "node dist/src/namespace-lifecycle-server.js",
         "start:dev": "tsx watch src/server.ts",
         "start:prod": "node dist/src/server.js",
         "setup": "node dist/setup.js",

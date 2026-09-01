@@ -11,6 +11,11 @@ import axios from 'axios';
 import { collectProjectHealth } from '../health';
 import { getProjectDbMode, getSharedDbConfig } from '../shared-db';
 import { normalizeProjectNetwork } from '../network';
+import {
+    deleteProjectNamespace,
+    ensureProjectNamespace,
+    logLifecycleFailure,
+} from '../namespace-lifecycle';
 
 const router = Router();
 
@@ -151,8 +156,17 @@ router.post('/create', requireRegisteredUser, async (req: Request, res: Response
     }
     const projectId = crypto.randomBytes(16).toString('hex');
 
-    execSync(`kubectl create namespace cars-project-${projectId} || true`, { stdio: 'inherit' });
-    logger.info(`Namespace cars-project-${projectId} ensured.`);
+    try {
+        await ensureProjectNamespace(projectId);
+        logger.info({ projectId }, 'Project namespace and runtime RBAC ensured');
+    } catch (error: any) {
+        logLifecycleFailure(error, { projectId, requestId: (req as any).requestId });
+        return res.status(503).json({
+            error: 'CARS cannot provision a project namespace right now',
+            code: 'CARS_NAMESPACE_LIFECYCLE_UNAVAILABLE',
+            requestId: (req as any).requestId,
+        });
+    }
 
     // Generate a random admin bearer token for OverlayExpress
     const adminBearerToken = crypto.randomBytes(32).toString('hex');
@@ -166,25 +180,56 @@ router.post('/create', requireRegisteredUser, async (req: Request, res: Response
         suppressDefaultSyncAdvertisements: true
     };
 
-    const [projId] = await db('projects').insert({
-        project_uuid: projectId,
-        name: name || 'Unnamed Project',
-        balance: 0,
-        network,
-        private_key: null,
-        engine_config: JSON.stringify(defaultEngineConfig),
-        admin_bearer_token: adminBearerToken
-    }, ['id']).returning('id');
+    try {
+        await db.transaction(async trx => {
+            const inserted = await trx('projects').insert({
+                project_uuid: projectId,
+                name: name || 'Unnamed Project',
+                balance: 0,
+                network,
+                private_key: null,
+                engine_config: JSON.stringify(defaultEngineConfig),
+                admin_bearer_token: adminBearerToken
+            }, ['id']).returning('id');
+            const first = inserted[0] as any;
+            const projectDbId = typeof first === 'object' ? first.id : first;
+            if (projectDbId == null) throw new Error('Project insert did not return an id');
 
-    await db('project_admins').insert({
-        project_id: projId,
-        identity_key: identityKey
-    });
-
-    await db('logs').insert({
-        project_id: projId.id,
-        message: 'Project created'
-    });
+            await trx('project_admins').insert({
+                project_id: projectDbId,
+                identity_key: identityKey
+            });
+            await trx('logs').insert({
+                project_id: projectDbId,
+                message: 'Project created'
+            });
+        });
+    } catch (error: any) {
+        let compensationFailed = false;
+        try {
+            await deleteProjectNamespace(projectId);
+        } catch (compensationError: any) {
+            compensationFailed = true;
+            logLifecycleFailure(compensationError, {
+                projectId,
+                requestId: (req as any).requestId,
+                alert: 'cars.project_create.compensation_failed',
+                splitBrain: true,
+            });
+        }
+        logger.error({
+            projectId,
+            requestId: (req as any).requestId,
+            error: error.message,
+            compensationFailed,
+            alert: 'cars.project_create.failed',
+        }, 'Project database creation failed');
+        return res.status(503).json({
+            error: 'CARS could not complete project creation',
+            code: compensationFailed ? 'CARS_PROJECT_CREATE_RECONCILIATION_REQUIRED' : 'CARS_PROJECT_CREATE_FAILED',
+            requestId: (req as any).requestId,
+        });
+    }
 
     logger.info({ projectId, name, network }, 'Project created');
     return ok(res, { projectId }, 'Project created');
@@ -554,8 +599,17 @@ router.post('/:projectId/info', requireRegisteredUser, requireProject, requirePr
             engine_config: project.engine_config
         });
     } catch (error: any) {
-        logger.error({ error: error.message }, 'Error getting project info');
-        res.status(500).json({ error: 'Failed to get project info' });
+        logger.error({
+            error: error.message,
+            projectId: project.project_uuid,
+            requestId: (req as any).requestId,
+            alert: 'cars.project_info.unavailable',
+        }, 'Error getting project info');
+        res.status(503).json({
+            error: 'CARS Kubernetes control plane is unavailable for this project',
+            code: 'CARS_KUBERNETES_UNAVAILABLE',
+            requestId: (req as any).requestId,
+        });
     }
 });
 
@@ -566,8 +620,17 @@ router.post('/:projectId/health', requireRegisteredUser, requireProject, require
         const health = await collectProjectHealth(project.project_uuid, { includeRemoteBackendHealth: true });
         res.status(health.status === 'error' ? 503 : 200).json(health);
     } catch (error: any) {
-        logger.error({ error: error.message, projectId: project.project_uuid }, 'Error getting project health');
-        res.status(500).json({ error: 'Failed to get project health' });
+        logger.error({
+            error: error.message,
+            projectId: project.project_uuid,
+            requestId: (req as any).requestId,
+            alert: 'cars.project_health.unavailable',
+        }, 'Error getting project health');
+        res.status(503).json({
+            error: 'CARS Kubernetes control plane is unavailable for this project',
+            code: 'CARS_KUBERNETES_UNAVAILABLE',
+            requestId: (req as any).requestId,
+        });
     }
 });
 
@@ -580,21 +643,18 @@ router.post('/:projectId/delete', requireRegisteredUser, requireProject, require
     const project = (req as any).project;
     const user = (req as any).user;
 
-    const namespace = `cars-project-${project.project_uuid}`;
-    const helmReleaseName = `cars-project-${project.project_uuid.substr(0, 24)}`;
-
-    // Uninstall helm release
     try {
-        execSync(`helm uninstall ${helmReleaseName} -n ${namespace}`, { stdio: 'inherit' });
-    } catch (e) {
-        logger.warn({ project_uuid: project.project_uuid }, 'Helm uninstall failed or not found. Continuing.');
-    }
-
-    // Delete namespace
-    try {
-        execSync(`kubectl delete namespace ${namespace}`, { stdio: 'inherit' });
-    } catch (e) {
-        logger.warn({ project_uuid: project.project_uuid }, 'Namespace deletion failed or not found. Continuing.');
+        await deleteProjectNamespace(project.project_uuid);
+    } catch (error: any) {
+        logLifecycleFailure(error, {
+            projectId: project.project_uuid,
+            requestId: (req as any).requestId,
+        });
+        return res.status(503).json({
+            error: 'CARS could not remove the project namespace; the project record was preserved',
+            code: 'CARS_NAMESPACE_DELETE_FAILED',
+            requestId: (req as any).requestId,
+        });
     }
 
     // Gather admins
@@ -605,7 +665,29 @@ router.post('/:projectId/delete', requireRegisteredUser, requireProject, require
 
     const emails = admins.map((a: any) => a.email);
 
-    // Send notification email
+    try {
+        await db.transaction(async trx => {
+            await trx('project_accounting').where({ project_id: project.id }).del();
+            await trx('deploys').where({ project_id: project.id }).del();
+            await trx('project_admins').where({ project_id: project.id }).del();
+            await trx('logs').where({ project_id: project.id }).del();
+            await trx('projects').where({ id: project.id }).del();
+        });
+    } catch (error: any) {
+        logger.error({
+            projectId: project.project_uuid,
+            requestId: (req as any).requestId,
+            error: error.message,
+            splitBrain: true,
+            alert: 'cars.project_delete.database_cleanup_failed',
+        }, 'Project namespace was removed but database cleanup failed');
+        return res.status(503).json({
+            error: 'Project resources were removed, but CARS reconciliation is required',
+            code: 'CARS_PROJECT_DELETE_RECONCILIATION_REQUIRED',
+            requestId: (req as any).requestId,
+        });
+    }
+
     const subject = `Project Deleted: ${project.name}`;
     const body = `Hello,
 
@@ -617,15 +699,16 @@ All resources have been removed.
 
 Regards,
 CARS System`;
-
-    await sendAdminNotificationEmail(emails, project, body, subject);
-
-    // Delete from DB
-    await db('project_accounting').where({ project_id: project.id }).del();
-    await db('deploys').where({ project_id: project.id }).del();
-    await db('project_admins').where({ project_id: project.id }).del();
-    await db('logs').where({ project_id: project.id }).del();
-    await db('projects').where({ id: project.id }).del();
+    try {
+        await sendAdminNotificationEmail(emails, project, body, subject);
+    } catch (error: any) {
+        logger.error({
+            projectId: project.project_uuid,
+            requestId: (req as any).requestId,
+            error: error.message,
+            alert: 'cars.project_delete.notification_failed',
+        }, 'Project deletion notification failed after successful deletion');
+    }
 
     res.json({ message: 'Project deleted' });
 });

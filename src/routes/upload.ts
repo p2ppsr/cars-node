@@ -34,6 +34,7 @@ import {
 import { inspectProjectCapabilities, replaceProjectCapabilities } from '../advertisements/registry';
 import { buildProjectIngressTls } from '../ingress-tls';
 import { isPublicDiscoveryRoot } from '../public-discovery-root';
+import { ensureProjectNamespace } from '../namespace-lifecycle';
 import {
   DEFAULT_DISCOVERY_DENYLIST,
   serializeDiscoveryCapabilityDenylist,
@@ -131,6 +132,10 @@ export default async (req: Request, res: Response) => {
     if (!project) {
       return res.status(400).json({ error: 'Project not found' });
     }
+
+    // Namespace existence and the exact runtime RoleBinding are controller-owned.
+    // Fail before accepting/building an artifact when that contract cannot be proven.
+    await ensureProjectNamespace(project.project_uuid);
 
     // 3) Check project balance before accepting the upload body.
     if (project.balance < 1) {
@@ -1336,7 +1341,7 @@ spec:
     // 15) Deploy with Helm
     const helmTimeout = process.env.CARS_HELM_TIMEOUT || '20m';
     await runCmd(
-      `helm upgrade --install ${helmReleaseName} ${helmDir} --namespace ${namespace} --atomic --create-namespace --timeout ${helmTimeout}`
+      `helm upgrade --install ${helmReleaseName} ${helmDir} --namespace ${namespace} --atomic --timeout ${helmTimeout}`
     );
     await logStep(`Helm release ${helmReleaseName} deployed for project ${project.project_uuid}`);
 
