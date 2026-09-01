@@ -135,11 +135,13 @@ async function claimTakedown(db: any, operationId: string): Promise<'claimed' | 
 export default async (req, res) => {
   let operationId: string | undefined;
   try {
-    if (!Buffer.isBuffer(req.body)) {
+    const untrustedBody: unknown = req.body;
+    if (!Buffer.isBuffer(untrustedBody)) {
       return res.status(415).json({ error: 'Takedown notices must use application/octet-stream' });
     }
-    const body: Buffer = req.body;
-    if (body.length < 1 || body.length > 2 * 1024 * 1024) {
+    const body = Buffer.from(untrustedBody);
+    const bodyBytes = Buffer.byteLength(body);
+    if (bodyBytes < 1 || bodyBytes > 2 * 1024 * 1024) {
       return res.status(413).json({ error: 'Takedown notice is too large' });
     }
     const tx = Transaction.fromBEEF(Array.from(body));
