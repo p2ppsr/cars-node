@@ -15,9 +15,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  RELEASE_NODE_IMAGE: docker.io/library/node:24.19.0-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
-
 jobs:
   build:
     runs-on:
@@ -41,22 +38,21 @@ jobs:
           git fetch --no-tags origin master
           git merge-base --is-ancestor "${SOURCE_SHA}" origin/master
 
+      - name: Audit dependencies and generate SBOM
+        env:
+          BUILDKIT_PROGRESS: plain
+        run: |
+          docker build --platform linux/amd64 \
+            --target release-security-evidence \
+            --build-arg "SECURITY_AUDIT_NONCE=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --output type=tar,dest=- . | tar --extract --file=-
+          jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' release-sbom.cdx.json >/dev/null
+
       - name: Build and push image
         id: build
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: scripts/k8s/build-local-image.sh
-
-      - name: Audit production dependencies
-        run: |
-          tar --create --file=- package.json package-lock.json | \
-            docker run --rm --interactive --platform linux/amd64 \
-              "$RELEASE_NODE_IMAGE" sh -ceu '
-                mkdir /workspace
-                tar --extract --file=- --directory=/workspace
-                cd /workspace
-                npm audit --omit=dev --audit-level=high
-              '
 
       - name: Scan production image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -69,18 +65,6 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
           severity: CRITICAL,HIGH
-
-      - name: Generate production dependency SBOM
-        run: |
-          tar --create --file=- package.json package-lock.json | \
-            docker run --rm --interactive --platform linux/amd64 \
-              "$RELEASE_NODE_IMAGE" sh -ceu '
-                mkdir /workspace
-                tar --extract --file=- --directory=/workspace
-                cd /workspace
-                npm sbom --package-lock-only --omit=dev --sbom-format=cyclonedx
-              ' > release-sbom.cdx.json
-          jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' release-sbom.cdx.json >/dev/null
 
       - name: Record immutable release
         run: |

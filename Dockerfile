@@ -36,6 +36,22 @@ RUN curl --fail --location --proto '=https' --tlsv1.2 \
     install -m 0755 linux-amd64/helm /usr/local/bin/helm && \
     rm -rf helm.tar.gz linux-amd64
 
+FROM tools AS release-security
+
+WORKDIR /security
+COPY package.json package-lock.json ./
+
+# The workflow supplies a unique nonce so the network-backed audit cannot be
+# satisfied from a stale BuildKit layer while the verified toolchain remains
+# cacheable.
+ARG SECURITY_AUDIT_NONCE=manual
+RUN test -n "${SECURITY_AUDIT_NONCE}" && \
+    npm audit --omit=dev --audit-level=high && \
+    npm sbom --package-lock-only --omit=dev --sbom-format=cyclonedx > release-sbom.cdx.json
+
+FROM scratch AS release-security-evidence
+COPY --from=release-security /security/release-sbom.cdx.json /release-sbom.cdx.json
+
 FROM ${BUILDAH_IMAGE} AS build
 
 RUN dnf upgrade -y --refresh && \
