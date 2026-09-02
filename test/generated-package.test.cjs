@@ -251,3 +251,15 @@ test('shared MySQL pins the proven HAProxy backend failover policy', () => {
     /percona\/percona-xtradb-cluster:8\.4\.10-10\.1@sha256:c4c9f39ce0b4cff7bccc2c138c08ed60e78deb8539d0e1e3a51fbb2ce3db7875/
   )
 })
+
+test('generated frontend routing serves static directory indexes before fallbacks', () => {
+  const uploadRoute = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'routes', 'upload.ts'),
+    'utf8'
+  )
+
+  assert.match(
+    uploadRoute,
+    /try_files \$uri\/index\.html \$uri \$uri\.html \/404\.html \/index\.html;/
+  )
+})

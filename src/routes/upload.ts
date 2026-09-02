@@ -380,10 +380,10 @@ export default async (req: Request, res: Response) => {
 
     location / {
         add_header Cache-Control "no-cache" always;
-        # Serve an optional route-specific HTML shell (for example /learn.html)
-        # before falling back to the SPA. This preserves client-side routing while
-        # letting crawlers and social previews receive route-correct metadata.
-        try_files $uri $uri.html /404.html /index.html;
+        # Serve directory-index and flat route-specific HTML shells before falling
+        # back to the SPA. Directory indexes support static-site generators such as
+        # Astro, while flat shells support routes such as /learn.html.
+        try_files $uri/index.html $uri $uri.html /404.html /index.html;
     }
 }`
       );
