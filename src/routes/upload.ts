@@ -629,7 +629,7 @@ spec:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
-      maxUnavailable: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: {{ include "cars-project.fullname" . }}
@@ -686,8 +686,16 @@ spec:
           allowPrivilegeEscalation: false
           capabilities:
             drop: ["ALL"]
+          readOnlyRootFilesystem: true
           runAsNonRoot: true
           runAsUser: 65532
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
       - name: wait-for-mongo
         image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
         command:
@@ -701,8 +709,16 @@ spec:
           allowPrivilegeEscalation: false
           capabilities:
             drop: ["ALL"]
+          readOnlyRootFilesystem: true
           runAsNonRoot: true
           runAsUser: 65532
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
       {{- end }}
       containers:
       {{- if .Values.backendImage }}
@@ -790,7 +806,11 @@ ${propagationProviderEnv}        - name: KNEX_URL
           timeoutSeconds: 5
         resources:
           requests:
-            cpu: 100m  
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
         volumeMounts:
         - name: tmp
           mountPath: /tmp
@@ -807,6 +827,13 @@ ${propagationProviderEnv}        - name: KNEX_URL
           runAsUser: 101
         ports:
         - containerPort: 8080
+        startupProbe:
+          httpGet:
+            path: /
+            port: 8080
+          failureThreshold: 30
+          periodSeconds: 2
+          timeoutSeconds: 1
         readinessProbe:
           httpGet:
             path: /
@@ -821,7 +848,11 @@ ${propagationProviderEnv}        - name: KNEX_URL
           periodSeconds: 20
         resources:
           requests:
-            cpu: 100m  
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
         volumeMounts:
         - name: tmp
           mountPath: /tmp
