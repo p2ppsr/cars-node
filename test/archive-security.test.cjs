@@ -40,6 +40,7 @@ test('extracts regular deployment files inside the destination', async t => {
 test('ignores only a harmless directory marker for the archive root', async t => {
   const fixture = await archive([
     { header: { name: './', type: 'directory' } },
+    { header: { name: './frontend/', type: 'directory' } },
     { header: { name: './frontend/index.html', type: 'file' }, body: 'ok' },
   ]);
   t.after(() => fs.rm(fixture.dir, { recursive: true, force: true }));
@@ -47,9 +48,26 @@ test('ignores only a harmless directory marker for the archive root', async t =>
     maxEntries: 10,
     maxExpandedBytes: 1024,
   });
-  assert.equal(report.entries, 2);
+  assert.equal(report.entries, 3);
   assert.equal(await fs.readFile(path.join(fixture.output, 'frontend/index.html'), 'utf8'), 'ok');
   assert.throws(() => safeArchivePath(fixture.output, './'), /unsafe/);
+});
+
+test('directory compatibility does not weaken file or directory boundaries', async t => {
+  const trailingFile = await archive([{ header: { name: 'frontend/', type: 'file' }, body: 'bad' }]);
+  const traversalDirectory = await archive([{ header: { name: 'frontend/../../', type: 'directory' } }]);
+  t.after(() => Promise.all([
+    fs.rm(trailingFile.dir, { recursive: true, force: true }),
+    fs.rm(traversalDirectory.dir, { recursive: true, force: true }),
+  ]));
+  await assert.rejects(
+    extractTarGz(trailingFile.archivePath, trailingFile.output, { maxEntries: 10, maxExpandedBytes: 1024 }),
+    /unsafe/,
+  );
+  await assert.rejects(
+    extractTarGz(traversalDirectory.archivePath, traversalDirectory.output, { maxEntries: 10, maxExpandedBytes: 1024 }),
+    /unsafe|escapes/,
+  );
 });
 
 test('rejects traversal and link entries', async t => {
