@@ -79,14 +79,21 @@ export async function extractTarGz(
         continue;
       }
 
-      const target = safeArchivePath(destination, header.name);
-
       if (header.type === 'directory') {
+        if (declaredSize !== 0) {
+          throw new Error(`Archive directory entry must be empty: ${header.name}`);
+        }
+        // Tar directory names conventionally end in `/`. Remove only trailing
+        // separators after entry-type validation; safeArchivePath still rejects
+        // empty, absolute, repeated internal, traversal, and backslash paths.
+        const directoryName = header.name.replace(/\/+$/, '');
+        const target = safeArchivePath(destination, directoryName);
         await fs.ensureDir(target, 0o755);
         for await (const _chunk of stream) { /* directory entries have no body */ }
         continue;
       }
 
+      const target = safeArchivePath(destination, header.name);
       await fs.ensureDir(path.dirname(target), 0o755);
       let actualBytes = 0;
       const handle = await open(target, 'wx', 0o600);
