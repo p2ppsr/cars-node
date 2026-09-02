@@ -79,6 +79,10 @@ test('release source removes shell builds and separates the build controller', (
   assert.match(upload, /verifySignature[\s\S]*writeUploadToFile/);
   assert.match(upload, /status: 'uploading'/);
   assert.match(upload, /extractTarGz/);
+  assert.match(upload, /maxUnavailable: 0/);
+  assert.match(upload, /startupProbe:[\s\S]*httpGet:[\s\S]*failureThreshold: 30/);
+  assert.match(upload, /requests:[\s\S]*cpu: 100m[\s\S]*memory: 256Mi[\s\S]*limits:[\s\S]*memory: 2Gi/);
+  assert.match(upload, /requests:[\s\S]*cpu: 100m[\s\S]*memory: 64Mi[\s\S]*limits:[\s\S]*memory: 512Mi/);
   assert.match(builder, /127\.0\.0\.1/);
   assert.match(builder, /--cap-drop=all/);
   assert.match(builder, /--digestfile/);
