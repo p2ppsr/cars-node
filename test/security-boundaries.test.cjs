@@ -80,6 +80,7 @@ test('release source removes shell builds and separates the build controller', (
   assert.match(upload, /status: 'uploading'/);
   assert.match(upload, /extractTarGz/);
   assert.match(upload, /maxUnavailable: 0/);
+  assert.match(upload, /topologySpreadConstraints:[\s\S]*matchLabelKeys:[\s\S]*- pod-template-hash/);
   assert.match(upload, /startupProbe:[\s\S]*httpGet:[\s\S]*failureThreshold: 30/);
   assert.match(upload, /requests:[\s\S]*cpu: 100m[\s\S]*memory: 256Mi[\s\S]*limits:[\s\S]*memory: 2Gi/);
   assert.match(upload, /requests:[\s\S]*cpu: 100m[\s\S]*memory: 64Mi[\s\S]*limits:[\s\S]*memory: 512Mi/);
@@ -113,6 +114,7 @@ test('runtime cluster tools are rebuilt from pinned modules with patched depende
   const helmModule = fs.readFileSync(path.join(__dirname, '..', 'tools', 'helm', 'go.mod'), 'utf8');
   const kubectlModule = fs.readFileSync(path.join(__dirname, '..', 'tools', 'kubectl', 'go.mod'), 'utf8');
   assert.match(dockerfile, /GO_VERSION=1\.26\.6/);
+  assert.match(dockerfile, /BUILDAH_IMAGE=quay\.io\/buildah\/stable:v1\.43\.2@sha256:688d0e1dba1106d69a7c13f2d6734ed5764614ac5c0d68846af188752c00814e/);
   assert.match(dockerfile, /go mod verify/);
   assert.match(dockerfile, /v1\.34\.11\+cars\.1/);
   assert.match(dockerfile, /v4\.2\.4\+cars-patched-go1\.26\.6/);

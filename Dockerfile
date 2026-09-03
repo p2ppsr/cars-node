@@ -1,4 +1,4 @@
-ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.2@sha256:836f1db7d8a21dc26d63f6c4ef930cde3f2a69f3e9f4cae9cc6751ec7b7a40dc
+ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.2@sha256:688d0e1dba1106d69a7c13f2d6734ed5764614ac5c0d68846af188752c00814e
 
 FROM ${BUILDAH_IMAGE} AS node-tools
 
