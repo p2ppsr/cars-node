@@ -668,6 +668,11 @@ spec:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: DoNotSchedule
+          # Count only this ReplicaSet revision. Counting terminating pods from
+          # the previous revision can legally place both replacements on one
+          # node before the old replica disappears.
+          matchLabelKeys:
+            - pod-template-hash
           labelSelector:
             matchLabels:
               app: {{ include "cars-project.fullname" . }}
