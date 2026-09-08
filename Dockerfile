@@ -1,4 +1,6 @@
-ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.2@sha256:688d0e1dba1106d69a7c13f2d6734ed5764614ac5c0d68846af188752c00814e
+# The publisher rebuilds this version tag; the previous September 3 manifest
+# was removed upstream. Pin the reviewed September 8 index, never a floating tag.
+ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.2@sha256:56e6ebc9bb71c8303b1968fb51304d3512e14a1b8c730bd0b27ebdf772a34ceb
 
 FROM ${BUILDAH_IMAGE} AS node-tools
 
