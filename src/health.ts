@@ -49,6 +49,16 @@ function kubernetesHealthTimeoutMs() {
     return Math.max(100, Math.min(5000, Math.trunc(configured)));
 }
 
+function kubernetesHealthFailureGraceMs() {
+    const configured = Number(process.env.CARS_KUBERNETES_HEALTH_FAILURE_GRACE_MS || 30_000);
+    if (!Number.isFinite(configured)) {
+        return 30_000;
+    }
+    return Math.max(100, Math.min(120_000, Math.trunc(configured)));
+}
+
+let lastKubernetesHealthSuccessAt = 0;
+
 async function getCarsNamespace() {
     return await new Promise<any>((resolve, reject) => {
         execFile(
@@ -72,6 +82,31 @@ async function getCarsNamespace() {
             }
         );
     });
+}
+
+async function checkKubernetesHealth() {
+    try {
+        const namespace = await getCarsNamespace();
+        lastKubernetesHealthSuccessAt = Date.now();
+        return {
+            status: 'ok' as const,
+            details: { phase: namespace.status?.phase || 'Unknown' }
+        };
+    } catch (error: any) {
+        const failedAt = Date.now();
+        const lastSuccessAgeMs = lastKubernetesHealthSuccessAt > 0
+            ? failedAt - lastKubernetesHealthSuccessAt
+            : undefined;
+        const failureGraceMs = kubernetesHealthFailureGraceMs();
+        if (lastSuccessAgeMs !== undefined && lastSuccessAgeMs <= failureGraceMs) {
+            return {
+                status: 'degraded' as const,
+                message: error?.message || 'Kubernetes health check failed within the readiness grace period',
+                details: { lastSuccessAgeMs, failureGraceMs }
+            };
+        }
+        throw error;
+    }
 }
 
 async function runHealthCheck(definition: HealthCheckDefinition): Promise<HealthCheckResult> {
@@ -166,13 +201,7 @@ export async function collectSystemHealth(db: Knex, options: {
             name: 'kubernetes',
             readinessCritical: true,
             livenessCritical: false,
-            handler: async () => {
-                const namespace = await getCarsNamespace();
-                return {
-                    status: 'ok',
-                    details: { phase: namespace.status?.phase || 'Unknown' }
-                };
-            }
+            handler: checkKubernetesHealth
         }),
         runHealthCheck({
             name: 'startup',
