@@ -625,6 +625,9 @@ metadata:
     app: {{ include "cars-project.fullname" . }}
 spec:
   replicas: {{ .Values.appReplicas }}
+  {{- if and .Values.frontendImage (not .Values.backendImage) }}
+  minReadySeconds: 10
+  {{- end }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -640,6 +643,9 @@ spec:
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- if and .Values.frontendImage (not .Values.backendImage) }}
+      terminationGracePeriodSeconds: 30
+      {{- end }}
       securityContext:
         fsGroup: 65532
         fsGroupChangePolicy: OnRootMismatch
@@ -823,6 +829,12 @@ ${propagationProviderEnv}        - name: KNEX_URL
       {{- if .Values.frontendImage }}
       - name: frontend
         image: {{ .Values.frontendImage }}
+        {{- if not .Values.backendImage }}
+        lifecycle:
+          preStop:
+            sleep:
+              seconds: 10
+        {{- end }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -1016,6 +1028,12 @@ metadata:
     nginx.ingress.kubernetes.io/session-cookie-name: "route"
     nginx.ingress.kubernetes.io/session-cookie-max-age: "86400"
     nginx.ingress.kubernetes.io/session-cookie-expires: "86400"
+    {{- if and .Values.frontendImage (not .Values.backendImage) }}
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "1"
+    nginx.ingress.kubernetes.io/proxy-next-upstream: "error timeout"
+    nginx.ingress.kubernetes.io/proxy-next-upstream-timeout: "2"
+    nginx.ingress.kubernetes.io/proxy-next-upstream-tries: "2"
+    {{- end }}
 spec:
   ingressClassName: nginx
   tls:
