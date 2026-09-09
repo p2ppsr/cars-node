@@ -562,7 +562,7 @@ description: A chart to deploy a CARS project
       appReplicas: 2,
       appMinReplicas: 2,
       appMaxReplicas: 4,
-      computeNodes: ['server2', 'server3'],
+      computeNodes: ['box', 'server2', 'server3', 'server4'],
       storageWitnessNode: 'box',
       mysqlServiceName: sharedDbCredentials?.mysqlWaitHost || 'mysql-ha',
       mongoReplicaSetName: 'rs0',
