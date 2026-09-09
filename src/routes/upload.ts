@@ -817,7 +817,7 @@ ${propagationProviderEnv}        - name: KNEX_URL
           timeoutSeconds: 5
         resources:
           requests:
-            cpu: 100m
+            cpu: 50m
             memory: 256Mi
           limits:
             cpu: "2"
@@ -865,7 +865,7 @@ ${propagationProviderEnv}        - name: KNEX_URL
           periodSeconds: 20
         resources:
           requests:
-            cpu: 100m
+            cpu: 50m
             memory: 64Mi
           limits:
             cpu: 500m
