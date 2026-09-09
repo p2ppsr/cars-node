@@ -196,6 +196,7 @@ test('control-plane image and deploy path pin and verify the production supply c
     'utf8'
   )
   assert.match(advertisementManifest, /topologySpreadConstraints:/)
+  assert.match(advertisementManifest, /values: \[box, server2, server3, server4\]/)
   assert.match(advertisementManifest, /minDomains: 2/)
   assert.match(advertisementManifest, /whenUnsatisfiable: DoNotSchedule/)
   assert.match(advertisementManifest, /matchLabelKeys:\n\s+- pod-template-hash/)
@@ -246,6 +247,7 @@ test('shared MySQL pins the proven HAProxy backend failover policy', () => {
     path.join(__dirname, '..', 'src', 'routes', 'upload.ts'),
     'utf8'
   )
+  assert.match(uploadRoute, /computeNodes: \['box', 'server2', 'server3', 'server4'\]/)
   assert.match(
     uploadRoute,
     /percona\/percona-xtradb-cluster:8\.4\.10-10\.1@sha256:c4c9f39ce0b4cff7bccc2c138c08ed60e78deb8539d0e1e3a51fbb2ce3db7875/
