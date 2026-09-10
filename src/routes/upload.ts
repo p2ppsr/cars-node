@@ -34,7 +34,7 @@ import {
   type ProjectNetwork,
 } from '../network';
 import { inspectProjectCapabilities, replaceProjectCapabilities } from '../advertisements/registry';
-import { buildProjectIngressTls } from '../ingress-tls';
+import { buildProjectGatewayResources } from '../gateway-routes';
 import { isPublicDiscoveryRoot } from '../public-discovery-root';
 import { ensureProjectNamespace } from '../namespace-lifecycle';
 import { deploymentWorkspaceRoot } from '../deployment-workspace';
@@ -956,6 +956,9 @@ spec:
               kubernetes.io/metadata.name: ingress
         - namespaceSelector:
             matchLabels:
+              kubernetes.io/metadata.name: envoy-gateway-system
+        - namespaceSelector:
+            matchLabels:
               kubernetes.io/metadata.name: cars-operator-system
       ports:
         {{- if .Values.backendImage }}
@@ -1004,102 +1007,21 @@ spec:
     );
 
     //
-    // 14d) Ingress for both frontend and backend
+    // 14d) Envoy Gateway routes for both frontend and backend
     //
-    const ingressTls = buildProjectIngressTls({
+    const gatewayResources = buildProjectGatewayResources({
       projectUuid: project.project_uuid,
+      releaseName: helmReleaseName,
       frontendEnabled,
       backendEnabled,
+      frontendHost: valuesObj.ingressHostFrontend,
+      backendHost: valuesObj.ingressHostBackend,
       frontendCustomDomain: valuesObj.ingressCustomFrontend,
       backendCustomDomain: valuesObj.ingressCustomBackend,
     });
-
-    let ingressYaml = `apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: {{ include "cars-project.fullname" . }}-ingress
-  labels:
-    app: {{ include "cars-project.fullname" . }}
-    created-by: cars
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-production"
-    nginx.ingress.kubernetes.io/affinity: "cookie"
-    nginx.ingress.kubernetes.io/affinity-mode: "persistent"
-    nginx.ingress.kubernetes.io/session-cookie-name: "route"
-    nginx.ingress.kubernetes.io/session-cookie-max-age: "86400"
-    nginx.ingress.kubernetes.io/session-cookie-expires: "86400"
-    {{- if and .Values.frontendImage (not .Values.backendImage) }}
-    nginx.ingress.kubernetes.io/proxy-connect-timeout: "1"
-    nginx.ingress.kubernetes.io/proxy-next-upstream: "error timeout"
-    nginx.ingress.kubernetes.io/proxy-next-upstream-timeout: "2"
-    nginx.ingress.kubernetes.io/proxy-next-upstream-tries: "2"
-    {{- end }}
-spec:
-  ingressClassName: nginx
-  tls:
-${ingressTls}  rules:
-`;
-
-    if (frontendEnabled) {
-      ingressYaml += `
-  - host: {{ .Values.ingressHostFrontend }}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: {{ include "cars-project.fullname" . }}-service
-            port:
-              number: 80
-`;
-      if (project.frontend_custom_domain) {
-        ingressYaml += `
-  - host: {{ .Values.ingressCustomFrontend }}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: {{ include "cars-project.fullname" . }}-service
-            port:
-              number: 80
-`;
-      }
-    }
-    if (backendEnabled) {
-      ingressYaml += `
-  - host: {{ .Values.ingressHostBackend }}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: {{ include "cars-project.fullname" . }}-service
-            port:
-              number: 8080
-`;
-      if (project.backend_custom_domain) {
-        ingressYaml += `
-  - host: {{ .Values.ingressCustomBackend }}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: {{ include "cars-project.fullname" . }}-service
-            port:
-              number: 8080
-`;
-      }
-    }
-
     fs.writeFileSync(
-      path.join(helmDir, 'templates', 'ingress.yaml'),
-      ingressYaml
+      path.join(helmDir, 'templates', 'gateway.yaml'),
+      gatewayResources
     );
 
 

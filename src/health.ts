@@ -295,7 +295,12 @@ export async function collectProjectHealth(projectId: string, options: {
     const releaseName = releaseNameForProject(projectId);
     const projectDbMode = getProjectDbMode();
     const sharedDbConfig = getSharedDbConfig();
-    const resources = kubectlJson(['get', 'deploy,sts,svc,pdb,hpa,ingress', '-n', namespace, '-o', 'json']);
+    const resources = kubectlJson([
+        'get',
+        'deploy,sts,svc,pdb,hpa,ingress,gateway.gateway.networking.k8s.io,httproute.gateway.networking.k8s.io,backendtrafficpolicy.gateway.envoyproxy.io',
+        '-n', namespace,
+        '-o', 'json'
+    ]);
     const pods = kubectlJson(['get', 'pods', '-n', namespace, '-o', 'json']);
     let pxcResources: any[] = [];
     if (projectDbMode === 'legacy-per-project') {
@@ -330,6 +335,9 @@ export async function collectProjectHealth(projectId: string, options: {
     const appDeployment = items.find((item: any) => item.kind === 'Deployment' && item.metadata?.name === `${releaseName}-deployment`);
     const appService = items.find((item: any) => item.kind === 'Service' && item.metadata?.name === `${releaseName}-service`);
     const appIngresses = items.filter((item: any) => item.kind === 'Ingress');
+    const appGateways = items.filter((item: any) => item.kind === 'Gateway');
+    const appRoutes = items.filter((item: any) => item.kind === 'HTTPRoute');
+    const appTrafficPolicies = items.filter((item: any) => item.kind === 'BackendTrafficPolicy');
     const appPdb = items.find((item: any) => item.kind === 'PodDisruptionBudget' && item.metadata?.name === `${releaseName}-deployment`);
     const appHpa = items.find((item: any) => item.kind === 'HorizontalPodAutoscaler' && item.metadata?.name === `${releaseName}-deployment`);
     const mongoStatefulSet = items.find((item: any) => item.kind === 'StatefulSet' && item.metadata?.name === 'mongo-rs');
@@ -349,21 +357,45 @@ export async function collectProjectHealth(projectId: string, options: {
     const backendContainer = appDeployment?.spec?.template?.spec?.containers?.find((container: any) => container.name === 'backend');
     const deploymentId = typeof backendContainer?.image === 'string' ? backendContainer.image.split(':').slice(1).join(':') || null : null;
 
-    const backendHosts = appIngresses.flatMap((ingress: any) =>
+    const legacyBackendHosts = appIngresses.flatMap((ingress: any) =>
         (ingress.spec?.rules || [])
             .filter((rule: any) => (rule.http?.paths || []).some((path: any) => path.backend?.service?.port?.number === 8080))
             .map((rule: any) => rule.host)
     );
-    const frontendHosts = appIngresses.flatMap((ingress: any) =>
+    const legacyFrontendHosts = appIngresses.flatMap((ingress: any) =>
         (ingress.spec?.rules || [])
             .filter((rule: any) => (rule.http?.paths || []).some((path: any) => path.backend?.service?.port?.number === 80))
             .map((rule: any) => rule.host)
     );
+    const routeHostsForPort = (port: number) => appRoutes.flatMap((route: any) =>
+        (route.spec?.rules || []).some((rule: any) =>
+            (rule.backendRefs || []).some((backend: any) => backend.port === port)
+        ) ? (route.spec?.hostnames || []) : []
+    );
+    const backendHosts = [...new Set([...legacyBackendHosts, ...routeHostsForPort(8080)])];
+    const frontendHosts = [...new Set([...legacyFrontendHosts, ...routeHostsForPort(80)])];
     const backendHost = backendHosts[0];
 
-    const stickyIngress = appIngresses.length > 0 && appIngresses.every((ingress: any) =>
+    const legacyStickyIngress = appIngresses.length > 0 && appIngresses.every((ingress: any) =>
         ingress.metadata?.annotations?.['nginx.ingress.kubernetes.io/affinity'] === 'cookie' &&
         ingress.metadata?.annotations?.['nginx.ingress.kubernetes.io/session-cookie-name'] === 'route'
+    );
+    const stickyGatewayRoutes = appRoutes.length > 0 && appTrafficPolicies.some((policy: any) =>
+        policy.spec?.loadBalancer?.type === 'ConsistentHash' &&
+        policy.spec?.loadBalancer?.consistentHash?.type === 'Cookie' &&
+        policy.spec?.loadBalancer?.consistentHash?.cookie?.name === 'route'
+    );
+    const stickyIngress = legacyStickyIngress || stickyGatewayRoutes;
+    const gatewayRoutingReady = appGateways.length > 0 && appGateways.every((gateway: any) => {
+        const conditions = gateway.status?.conditions || [];
+        return conditions.some((condition: any) => condition.type === 'Accepted' && condition.status === 'True') &&
+            conditions.some((condition: any) => condition.type === 'Programmed' && condition.status === 'True');
+    }) && appRoutes.length > 0 && appRoutes.every((route: any) =>
+        (route.status?.parents || []).some((parent: any) => {
+            const conditions = parent.conditions || [];
+            return conditions.some((condition: any) => condition.type === 'Accepted' && condition.status === 'True') &&
+                conditions.some((condition: any) => condition.type === 'ResolvedRefs' && condition.status === 'True');
+        })
     );
 
     const checks = await Promise.all([
@@ -407,7 +439,17 @@ export async function collectProjectHealth(projectId: string, options: {
             })
         }),
         runHealthCheck({
-            name: 'ingress-stickiness',
+            name: 'gateway-routing',
+            handler: async () => ({
+                status: gatewayRoutingReady ? 'ok' : 'error',
+                details: {
+                    gateways: appGateways.map((gateway: any) => gateway.metadata?.name),
+                    routes: appRoutes.map((route: any) => route.metadata?.name)
+                }
+            })
+        }),
+        runHealthCheck({
+            name: 'traffic-stickiness',
             critical: false,
             handler: async () => ({
                 status: stickyIngress ? 'ok' : 'degraded',
@@ -416,6 +458,11 @@ export async function collectProjectHealth(projectId: string, options: {
                         name: ingress.metadata?.name,
                         affinity: ingress.metadata?.annotations?.['nginx.ingress.kubernetes.io/affinity'],
                         sessionCookieName: ingress.metadata?.annotations?.['nginx.ingress.kubernetes.io/session-cookie-name']
+                    })),
+                    gatewayPolicies: appTrafficPolicies.map((policy: any) => ({
+                        name: policy.metadata?.name,
+                        type: policy.spec?.loadBalancer?.consistentHash?.type,
+                        cookie: policy.spec?.loadBalancer?.consistentHash?.cookie?.name
                     }))
                 }
             })
