@@ -1,16 +1,31 @@
 import { execFileSync } from 'child_process';
 import logger from '../logger';
 
-// Disable ingress by removing ingress resources
+// Disable public routing by removing both legacy and Gateway API resources.
 export async function disableIngress(projectUUID: string) {
     if (!/^[a-f0-9]{32}$/.test(projectUUID)) throw new Error('Invalid project id');
     const namespace = `cars-project-${projectUUID}`;
     const helmReleaseName = `cars-project-${projectUUID.substr(0, 24)}`;
-    // We can patch the ingress to something unreachable or simply delete it.
-    // Let's delete the ingress to disable external access:
+    const gatewayResources = 'gateway.gateway.networking.k8s.io,httproute.gateway.networking.k8s.io,backendtrafficpolicy.gateway.envoyproxy.io';
     try {
         execFileSync('kubectl', ['delete', 'ingress', '-n', namespace, `${helmReleaseName}-ingress`, '--ignore-not-found=true']);
-        logger.info({ project_uuid: projectUUID }, 'Ingress disabled (deleted).');
+        execFileSync('kubectl', [
+            'delete',
+            gatewayResources,
+            '-n', namespace,
+            '-l', `app=${helmReleaseName}`,
+            '--ignore-not-found=true'
+        ]);
+        // During the migration, network-ops owns the same deterministic route
+        // objects until a project is next deployed and Helm adopts them.
+        execFileSync('kubectl', [
+            'delete',
+            gatewayResources,
+            '-n', namespace,
+            '-l', `network-ops.babbage.systems/source-ingress=${helmReleaseName}-ingress`,
+            '--ignore-not-found=true'
+        ]);
+        logger.info({ project_uuid: projectUUID }, 'Public Gateway routes disabled (deleted).');
     } catch (e) {
         logger.error({ project_uuid: projectUUID, error: (e as Error).message }, 'Failed to disable ingress');
     }
@@ -25,10 +40,10 @@ export async function enableIngress(projectUUID: string): Promise<boolean> {
     try {
         // Let's just assume we can do a helm rollback:
         execFileSync('helm', ['rollback', helmReleaseName, '1', '-n', namespace], { stdio: 'inherit' });
-        logger.info({ project_uuid: projectUUID }, 'Ingress enabled (rollback/upgrade performed).');
+        logger.info({ project_uuid: projectUUID }, 'Public Gateway routes enabled (rollback performed).');
         return true;
     } catch (e) {
-        logger.error({ project_uuid: projectUUID, error: (e as Error).message }, 'Failed to enable ingress. Re-run deployment.');
+        logger.error({ project_uuid: projectUUID, error: (e as Error).message }, 'Failed to enable public Gateway routes. Re-run deployment.');
     }
     return false;
 }

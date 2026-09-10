@@ -64,5 +64,8 @@
         "@types/node": "^20.4.2",
         "tsx": "^4.19.2",
         "typescript": "^5.2.2"
+    },
+    "overrides": {
+        "qs": "6.16.0"
     }
 }

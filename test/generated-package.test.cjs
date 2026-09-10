@@ -104,6 +104,37 @@ test('projects without custom domains retain the existing platform secret', () =
   )
 })
 
+test('generated projects use digest-stable Envoy Gateway routes and policies', () => {
+  const { buildProjectGatewayResources, gatewayObjectName } = require('../dist/src/gateway-routes.js')
+  const projectUuid = '9a52aaaabbbbccccddddeeeeffff0000'
+  const releaseName = 'cars-project-9a52aaaabbbbccccddddeeeef'
+  const generated = buildProjectGatewayResources({
+    projectUuid,
+    releaseName,
+    frontendEnabled: true,
+    backendEnabled: true,
+    frontendHost: `frontend.${projectUuid}.projects.babbage.systems`,
+    backendHost: `backend.${projectUuid}.projects.babbage.systems`,
+    frontendCustomDomain: 'app.example',
+    backendCustomDomain: 'api.example'
+  })
+
+  assert.match(generated, /kind: Gateway/)
+  assert.match(generated, /gatewayClassName: evans-envoy-private-pilot/)
+  assert.match(generated, /kind: HTTPRoute/)
+  assert.match(generated, /kind: BackendTrafficPolicy/)
+  assert.match(generated, /type: ConsistentHash/)
+  assert.match(generated, /type: Cookie/)
+  assert.match(generated, /name: route/)
+  assert.match(generated, /streamIdleTimeout: 21600s/)
+  assert.match(generated, /cert-manager.io\/cluster-issuer: letsencrypt-production/)
+  assert.doesNotMatch(generated, /kind: Ingress/)
+  assert.equal(
+    gatewayObjectName('gw', 'app.example'),
+    'gw-app-example-1353976013'
+  )
+})
+
 test('database migrations resolve beside the executing source or compiled module', () => {
   const dbSource = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'db.ts'),
