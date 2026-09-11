@@ -449,7 +449,7 @@ Set the custom domain's A record to your CARS Node's IP address, or create a CNA
 - `cars project logs` show logs.
 - Visit the project’s frontend and backend URLs in a browser.
 
-If SSL certificates for projects are required, CARS Node will annotate ingresses and cert-manager will obtain them. Ensure DNS is correct and Let’s Encrypt cluster issuer is set.
+If SSL certificates for projects are required, CARS Node annotates project Gateways and cert-manager obtains them. Ensure DNS is correct and the Let’s Encrypt ClusterIssuer is set.
 
 ---
 

@@ -11,6 +11,10 @@ export interface ProjectGatewayOptions {
   backendCustomDomain?: string | null;
 }
 
+const SHARED_HTTP_GATEWAY_NAME = 'evans-acme-http01';
+const SHARED_HTTP_GATEWAY_NAMESPACE = 'envoy-gateway-system';
+const SHARED_HTTP_GATEWAY_SECTION = 'http-acme';
+
 export function gatewayObjectName(prefix: string, ...parts: string[]): string {
   const raw = [prefix, ...parts].join('-').toLowerCase();
   const slug = raw.replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -50,8 +54,9 @@ spec:
   parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
-      name: ${gatewayName}
-      sectionName: ${listenerName(host, 'http')}
+      name: ${SHARED_HTTP_GATEWAY_NAME}
+      namespace: ${SHARED_HTTP_GATEWAY_NAMESPACE}
+      sectionName: ${SHARED_HTTP_GATEWAY_SECTION}
   hostnames: [${JSON.stringify(host)}]
   rules:
     - filters:
@@ -156,20 +161,13 @@ export function buildProjectGatewayResources(options: ProjectGatewayOptions): st
     seen.add(record.host);
   }
   const gatewayName = `${options.releaseName}-gateway`;
-  const listeners = records.map(record => `    - name: ${listenerName(record.host, 'http')}
-      hostname: ${JSON.stringify(record.host)}
-      port: 80
-      protocol: HTTP
-      allowedRoutes:
-        namespaces:
-          from: All
-    - name: ${listenerName(record.host, 'https')}
+  const listeners = records.map(record => `    - name: ${listenerName(record.host, 'https')}
       hostname: ${JSON.stringify(record.host)}
       port: 443
       protocol: HTTPS
       allowedRoutes:
         namespaces:
-          from: All
+          from: Same
       tls:
         mode: Terminate
         certificateRefs:

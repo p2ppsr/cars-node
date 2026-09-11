@@ -54,7 +54,7 @@ In short, CARS Node takes your `deployment-info.json` and packaged artifacts and
 
 - **Automated Kubernetes Provisioning:** CARS Node interacts with a Kubernetes cluster to schedule workloads, manage pods and services, and ensure high availability.
 - **Shared Project Databases:** New backend deployments use operator-owned shared MySQL and MongoDB clusters by default, with per-project databases and users for isolation instead of per-project database pods and PVCs.
-- **Dynamic Ingress and SSL:** Uses `ingress-nginx`, `cert-manager`, and Let’s Encrypt to automatically provision custom domains and HTTPS certificates.
+- **Dynamic Gateway routes and SSL:** Uses Envoy Gateway, Gateway API, `cert-manager`, and Let’s Encrypt to provision custom domains and HTTPS certificates.
 - **Billing and Resource Usage Tracking:** Integrates with Prometheus to gather CPU, memory, disk, and network usage over time, billing projects automatically.
 - **Multiple Environment Support:** Supports mainnet, testnet, and TerraTestNet project wallets. TTN deployments use Arcade for EF transaction broadcast and Arcade-backed go-chaintracks for proof/header validation, with no legacy ARC fallback.
 - **Identity and Project Management:** Integrates with the standard BSV identity system, ensuring only authorized admins can create or manage projects.
@@ -186,7 +186,7 @@ CARS Node periodically queries Prometheus for CPU, memory, disk, and network usa
 
 ### Domains and SSL Certificates
 
-CARS Node uses Kubernetes ingress with `ingress-nginx` and `cert-manager`:
+CARS Node uses Kubernetes Gateway API with Envoy Gateway and `cert-manager`:
 
 - Each project gets subdomains of `PROJECT_DEPLOYMENT_DNS_NAME` by default:  
   `frontend.<project-id>.<project-deployment-dns>`,  
