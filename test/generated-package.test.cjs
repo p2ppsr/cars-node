@@ -128,6 +128,11 @@ test('generated projects use digest-stable Envoy Gateway routes and policies', (
   assert.match(generated, /name: route/)
   assert.match(generated, /streamIdleTimeout: 21600s/)
   assert.match(generated, /cert-manager.io\/cluster-issuer: letsencrypt-production/)
+  assert.match(generated, /name: evans-acme-http01/)
+  assert.match(generated, /namespace: envoy-gateway-system/)
+  assert.match(generated, /sectionName: http-acme/)
+  assert.doesNotMatch(generated, /protocol: HTTP\n/)
+  assert.match(generated, /protocol: HTTPS\n/)
   assert.doesNotMatch(generated, /kind: Ingress/)
   assert.equal(
     gatewayObjectName('gw', 'app.example'),
