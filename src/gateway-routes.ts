@@ -167,7 +167,7 @@ export function buildProjectGatewayResources(options: ProjectGatewayOptions): st
       protocol: HTTPS
       allowedRoutes:
         namespaces:
-          from: Same
+          from: All
       tls:
         mode: Terminate
         certificateRefs:

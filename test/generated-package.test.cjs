@@ -133,6 +133,7 @@ test('generated projects use digest-stable Envoy Gateway routes and policies', (
   assert.match(generated, /sectionName: http-acme/)
   assert.doesNotMatch(generated, /protocol: HTTP\n/)
   assert.match(generated, /protocol: HTTPS\n/)
+  assert.match(generated, /from: All/)
   assert.doesNotMatch(generated, /kind: Ingress/)
   assert.equal(
     gatewayObjectName('gw', 'app.example'),
