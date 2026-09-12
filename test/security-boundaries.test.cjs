@@ -88,6 +88,17 @@ test('release source removes shell builds and separates the build controller', (
   assert.match(builder, /--cap-drop=all/);
   assert.match(builder, /--digestfile/);
   assert.match(builder, /@\$\{digest\}/);
+  const buildRoute = builder.slice(builder.indexOf("app.post('/v1/build'"));
+  const releaseLock = buildRoute.indexOf('buildActive = false;');
+  assert.ok(releaseLock > 0, 'build controller must release its serialization lock');
+  assert.ok(
+    releaseLock < buildRoute.indexOf("return res.status(500).json({ error: 'Image build failed' })"),
+    'failure response must not race build cleanup',
+  );
+  assert.ok(
+    releaseLock < buildRoute.indexOf("res.json({ status: 'ok', ...result })"),
+    'success response must not race build cleanup',
+  );
 });
 
 test('deployment scratch paths are opaque and bound to both tenant identifiers', () => {

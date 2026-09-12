@@ -101,6 +101,8 @@ async function main() {
   app.post('/v1/build', async (req, res) => {
     if (buildActive) return res.status(429).json({ error: 'A build is already active on this CARS replica' });
     let build: Awaited<ReturnType<typeof validateRequest>> | undefined;
+    let result: { image: string; digest: string } | undefined;
+    let buildFailed = false;
     try {
       build = await validateRequest(req.body);
       buildActive = true;
@@ -122,8 +124,9 @@ async function main() {
       }
       const imageReference = `${build.image}@${digest}`;
       logger.info({ ...build, digest }, 'CARS image build and push completed');
-      res.json({ status: 'ok', image: imageReference, digest });
+      result = { image: imageReference, digest };
     } catch (error: any) {
+      buildFailed = true;
       logger.error({
         projectId: build?.projectId,
         deploymentId: build?.deploymentId,
@@ -131,7 +134,6 @@ async function main() {
         error: error.message,
         alert: 'cars.build_controller.build_failed',
       }, 'CARS build controller failed');
-      res.status(500).json({ error: 'Image build failed' });
     } finally {
       if (build?.image) {
         const digestPath = path.join(deploymentWorkspaceRoot(build.projectId, build.deploymentId), `push-${build.kind}.digest`);
@@ -148,6 +150,10 @@ async function main() {
       }
       buildActive = false;
     }
+    if (buildFailed || !result) {
+      return res.status(500).json({ error: 'Image build failed' });
+    }
+    res.json({ status: 'ok', ...result });
   });
   const port = listenPort();
   const host = listenHost();
