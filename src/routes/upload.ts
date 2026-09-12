@@ -1486,7 +1486,10 @@ spec:
     const helmTimeout = process.env.CARS_HELM_TIMEOUT || '20m';
     await runCommand('helm', [
       'upgrade', '--install', helmReleaseName, helmDir,
-      '--namespace', namespace, '--atomic', '--timeout', helmTimeout,
+      // Helm 4 uses server-side apply for upgraded releases. CARS owns the
+      // generated chart, so reclaim fields from historical kubectl repairs
+      // instead of failing every subsequent automated rollout on conflicts.
+      '--namespace', namespace, '--atomic', '--force-conflicts', '--timeout', helmTimeout,
     ], { stdio: 'inherit', timeoutMs: 45 * 60 * 1000 });
     await logStep(`Helm release ${helmReleaseName} deployed for project ${project.project_uuid}`);
 
