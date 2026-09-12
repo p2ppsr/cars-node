@@ -48,6 +48,10 @@ test('combined project Pods keep frontend and backend listeners distinct', () =>
   assert.match(uploadSource, /EXPOSE \$\{frontendPort\}/)
   assert.match(uploadSource, /containerPort: \{\{ \.Values\.frontendPort \}\}/)
   assert.match(uploadSource, /targetPort: \{\{ \.Values\.frontendPort \}\}/)
+  assert.match(
+    uploadSource,
+    /kind: NetworkPolicy[\s\S]*?if \.Values\.frontendImage \}\}[\s\S]*?port: \{\{ \.Values\.frontendPort \}\}/
+  )
 })
 
 test('only configured compatibility hosts become public discovery roots', () => {
