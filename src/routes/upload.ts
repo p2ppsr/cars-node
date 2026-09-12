@@ -972,7 +972,7 @@ spec:
         {{- end }}
         {{- if .Values.frontendImage }}
         - protocol: TCP
-          port: 8080
+          port: {{ .Values.frontendPort }}
         {{- end }}
 `
     );
