@@ -204,6 +204,7 @@ export function generatePackageJson(backendDependencies: Record<string, string>)
     "name": "overlay-express-dev",
     "version": "1.0.0",
     "description": "",
+    "type": "module",
     "main": "index.ts",
     "scripts": {
       "start": "tsx index.ts"
