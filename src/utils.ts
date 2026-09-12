@@ -214,7 +214,7 @@ export function generatePackageJson(backendDependencies: Record<string, string>)
     "dependencies": {
       ...backendDependencies,
       "@bsv/overlay-express": "2.6.0",
-      "@bsv/sdk": "2.4.1",
+      "@bsv/sdk": "2.6.0",
       "mysql2": "^3.11.5",
       "tsx": "^4.19.2",
       "chalk": "^5.3.0"

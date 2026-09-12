@@ -30,6 +30,9 @@
     "publishConfig": {
         "access": "public"
     },
+    "engines": {
+        "node": ">=22"
+    },
     "dependencies": {
         "@bsv/auth-express-middleware": "^2.0.4",
         "@bsv/overlay": "2.3.0",
