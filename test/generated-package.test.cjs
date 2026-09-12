@@ -34,6 +34,7 @@ test('generated project backends are thin advertisement consumers', () => {
   assert.match(generated, /server\.configureEngine\(publicDiscoveryRoot\)/)
   assert.match(generated, /process\.env\.CARS_PUBLIC_DISCOVERY_ROOT === 'true'/)
   assert.doesNotMatch(generated, /process\.env\.SERVER_PRIVATE_KEY/)
+  assert.equal(packageJson.type, 'module')
   assert.equal(packageJson.dependencies['@bsv/sdk'], '2.6.0')
 })
 
