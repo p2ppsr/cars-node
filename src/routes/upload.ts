@@ -318,6 +318,10 @@ export default async (req: Request, res: Response) => {
     }
     const backendEnabled = deployTargets.includes('backend');
     const frontendEnabled = deployTargets.includes('frontend');
+    // Frontend and backend containers share a Pod network namespace. Keep the
+    // static server off the backend's fixed 8080 listener whenever both are
+    // deployed, while retaining the historical frontend-only port.
+    const frontendPort = backendEnabled ? 8081 : 8080;
 
     if (!frontendEnabled && !backendEnabled) {
       const errMsg = `No valid deploy targets found (must include "frontend" and/or "backend").`;
@@ -345,7 +349,7 @@ export default async (req: Request, res: Response) => {
       fs.writeFileSync(
         path.join(frontendDir, 'nginx.conf'),
         `server {
-    listen 8080;
+    listen ${frontendPort};
     server_name localhost;
     root /usr/share/nginx/html;
 
@@ -394,7 +398,7 @@ export default async (req: Request, res: Response) => {
         `FROM docker.io/nginxinc/nginx-unprivileged:alpine@sha256:d9083fe47768377ef55dedafd67d4da7c2f2bc2bece7554954f29359deb0dce9
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY . /usr/share/nginx/html
-EXPOSE 8080`
+EXPOSE ${frontendPort}`
       );
 
       // Build + push in the isolated, tokenless build sidecar.
@@ -552,6 +556,7 @@ description: A chart to deploy a CARS project
     const valuesObj = {
       backendImage,
       frontendImage,
+      frontendPort,
       ingressHostFrontend: `frontend.${ingressHost}`,
       ingressCustomFrontend: project.frontend_custom_domain,
       ingressHostBackend: `backend.${ingressHost}`,
@@ -843,24 +848,24 @@ ${propagationProviderEnv}        - name: KNEX_URL
           runAsNonRoot: true
           runAsUser: 101
         ports:
-        - containerPort: 8080
+        - containerPort: {{ .Values.frontendPort }}
         startupProbe:
           httpGet:
             path: /
-            port: 8080
+            port: {{ .Values.frontendPort }}
           failureThreshold: 30
           periodSeconds: 2
           timeoutSeconds: 1
         readinessProbe:
           httpGet:
             path: /
-            port: 8080
+            port: {{ .Values.frontendPort }}
           initialDelaySeconds: 5
           periodSeconds: 10
         livenessProbe:
           httpGet:
             path: /
-            port: 8080
+            port: {{ .Values.frontendPort }}
           initialDelaySeconds: 15
           periodSeconds: 20
         resources:
@@ -999,7 +1004,7 @@ spec:
   {{- end }}
   {{- if .Values.frontendImage }}
   - port: 80
-    targetPort: 8080
+    targetPort: {{ .Values.frontendPort }}
     protocol: TCP
     name: frontend
   {{- end }}

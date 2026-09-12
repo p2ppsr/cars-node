@@ -80,7 +80,10 @@ process.stdout.write('{"status":{"phase":"Active"}}')
   const originalTimeout = process.env.CARS_KUBERNETES_HEALTH_TIMEOUT_MS
   const originalGrace = process.env.CARS_KUBERNETES_HEALTH_FAILURE_GRACE_MS
   process.env.PATH = `${fakeBin}${path.delimiter}${originalPath}`
-  process.env.CARS_KUBERNETES_HEALTH_TIMEOUT_MS = '500'
+  // Leave enough room for the fake Node-based kubectl shim to start when the
+  // full test suite is running concurrently. The failure-grace behavior under
+  // test is independent of the subprocess startup timeout.
+  process.env.CARS_KUBERNETES_HEALTH_TIMEOUT_MS = '2000'
   process.env.CARS_KUBERNETES_HEALTH_FAILURE_GRACE_MS = '200'
   t.after(() => {
     process.env.PATH = originalPath

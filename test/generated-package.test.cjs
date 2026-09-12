@@ -34,7 +34,20 @@ test('generated project backends are thin advertisement consumers', () => {
   assert.match(generated, /server\.configureEngine\(publicDiscoveryRoot\)/)
   assert.match(generated, /process\.env\.CARS_PUBLIC_DISCOVERY_ROOT === 'true'/)
   assert.doesNotMatch(generated, /process\.env\.SERVER_PRIVATE_KEY/)
-  assert.equal(packageJson.dependencies['@bsv/sdk'], '2.4.1')
+  assert.equal(packageJson.dependencies['@bsv/sdk'], '2.6.0')
+})
+
+test('combined project Pods keep frontend and backend listeners distinct', () => {
+  const uploadSource = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'routes', 'upload.ts'),
+    'utf8'
+  )
+
+  assert.match(uploadSource, /const frontendPort = backendEnabled \? 8081 : 8080/)
+  assert.match(uploadSource, /listen \$\{frontendPort\}/)
+  assert.match(uploadSource, /EXPOSE \$\{frontendPort\}/)
+  assert.match(uploadSource, /containerPort: \{\{ \.Values\.frontendPort \}\}/)
+  assert.match(uploadSource, /targetPort: \{\{ \.Values\.frontendPort \}\}/)
 })
 
 test('only configured compatibility hosts become public discovery roots', () => {
