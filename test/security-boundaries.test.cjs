@@ -88,6 +88,10 @@ test('release source removes shell builds and separates the build controller', (
   assert.match(builder, /127\.0\.0\.1/);
   assert.match(builder, /--cap-drop=all/);
   assert.match(builder, /--digestfile/);
+  assert.match(builder, /--tls-verify=true/);
+  assert.match(builder, /--authfile/);
+  assert.match(builder, /--cert-dir/);
+  assert.doesNotMatch(builder, /--tls-verify=false/);
   assert.match(builder, /@\$\{digest\}/);
   const buildRoute = builder.slice(builder.indexOf("app.post('/v1/build'"));
   const releaseLock = buildRoute.indexOf('buildActive = false;');
@@ -126,7 +130,7 @@ test('runtime cluster tools are rebuilt from pinned modules with patched depende
   const helmModule = fs.readFileSync(path.join(__dirname, '..', 'tools', 'helm', 'go.mod'), 'utf8');
   const kubectlModule = fs.readFileSync(path.join(__dirname, '..', 'tools', 'kubectl', 'go.mod'), 'utf8');
   assert.match(dockerfile, /GO_VERSION=1\.26\.6/);
-  assert.match(dockerfile, /BUILDAH_IMAGE=quay\.io\/buildah\/stable:v1\.43\.2@sha256:82464727761208e2782447b52e25ffe0860b8a5f8b8e4085854ad0a1cd042b96/);
+  assert.match(dockerfile, /BUILDAH_IMAGE=quay\.io\/buildah\/stable:v1\.43\.2@sha256:2d2992785d226ffb6ef07f10bb3894d4b9997b86065a662245ca0a7a6028e79d/);
   assert.match(dockerfile, /go mod verify/);
   assert.match(dockerfile, /v1\.34\.11\+cars\.1/);
   assert.match(dockerfile, /v4\.2\.4\+cars-patched-go1\.26\.6/);
