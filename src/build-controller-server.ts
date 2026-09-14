@@ -148,7 +148,7 @@ async function main() {
         projectId: build?.projectId,
         deploymentId: build?.deploymentId,
         kind: build?.kind,
-        error: error.message,
+        errorType: error instanceof Error ? error.name : 'Error',
         alert: 'cars.build_controller.build_failed',
       }, 'CARS build controller failed');
     } finally {
