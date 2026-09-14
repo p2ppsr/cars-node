@@ -88,6 +88,10 @@ test('release source removes shell builds and separates the build controller', (
   assert.match(builder, /127\.0\.0\.1/);
   assert.match(builder, /--cap-drop=all/);
   assert.match(builder, /--digestfile/);
+  assert.match(builder, /--tls-verify=true/);
+  assert.match(builder, /--authfile/);
+  assert.match(builder, /--cert-dir/);
+  assert.doesNotMatch(builder, /--tls-verify=false/);
   assert.match(builder, /@\$\{digest\}/);
   const buildRoute = builder.slice(builder.indexOf("app.post('/v1/build'"));
   const releaseLock = buildRoute.indexOf('buildActive = false;');

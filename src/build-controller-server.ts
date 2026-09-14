@@ -52,6 +52,20 @@ function registry(): string {
   return value;
 }
 
+async function registrySecurity(): Promise<{ authFile: string; certDir: string }> {
+  const authFile = process.env.REGISTRY_AUTH_FILE;
+  const certDir = process.env.REGISTRY_CERT_DIR;
+  if (!authFile || !path.isAbsolute(authFile)) {
+    throw new Error('REGISTRY_AUTH_FILE must be an absolute path');
+  }
+  if (!certDir || !path.isAbsolute(certDir)) {
+    throw new Error('REGISTRY_CERT_DIR must be an absolute path');
+  }
+  await fs.access(authFile);
+  await fs.access(path.join(certDir, 'ca.crt'));
+  return { authFile, certDir };
+}
+
 async function validateRequest(body: any): Promise<{
   kind: BuildKind;
   projectId: string;
@@ -75,6 +89,7 @@ async function validateRequest(body: any): Promise<{
 async function main() {
   token();
   registry();
+  const registrySecurityFiles = await registrySecurity();
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '32kb' }));
@@ -112,7 +127,9 @@ async function main() {
         '-t', build.image, '.',
       ], { cwd: build.contextDir, stdio: 'inherit', timeoutMs: 90 * 60 * 1000 });
       await runCommand('buildah', [
-        'push', '--storage-driver=vfs', '--tls-verify=false',
+        'push', '--storage-driver=vfs', '--tls-verify=true',
+        '--authfile', registrySecurityFiles.authFile,
+        '--cert-dir', registrySecurityFiles.certDir,
         '--digestfile', path.join(deploymentWorkspaceRoot(build.projectId, build.deploymentId), `push-${build.kind}.digest`),
         build.image,
       ], { cwd: build.contextDir, stdio: 'inherit', timeoutMs: 30 * 60 * 1000 });
