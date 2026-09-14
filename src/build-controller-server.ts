@@ -142,13 +142,9 @@ async function main() {
       const imageReference = `${build.image}@${digest}`;
       logger.info({ ...build, digest }, 'CARS image build and push completed');
       result = { image: imageReference, digest };
-    } catch (error: any) {
+    } catch {
       buildFailed = true;
       logger.error({
-        projectId: build?.projectId,
-        deploymentId: build?.deploymentId,
-        kind: build?.kind,
-        errorType: error instanceof Error ? error.name : 'Error',
         alert: 'cars.build_controller.build_failed',
       }, 'CARS build controller failed');
     } finally {
