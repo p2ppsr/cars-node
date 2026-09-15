@@ -238,6 +238,19 @@ function namespaceIsValid(namespace: any, projectId: string): boolean {
     Object.entries(requiredNamespaceLabels).every(([key, value]) => labels[key] === value);
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map(key =>
+      `${JSON.stringify(key)}:${canonicalJson(record[key])}`
+    ).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function networkPolicyIsValid(policy: any, projectId: string): boolean {
   const expected = networkPolicyDocument(projectId);
   return policy?.metadata?.name === networkPolicyName &&
@@ -245,7 +258,7 @@ function networkPolicyIsValid(policy: any, projectId: string): boolean {
     policy?.metadata?.labels?.['app.kubernetes.io/managed-by'] === 'cars-namespace-lifecycle' &&
     policy?.metadata?.labels?.['cars.bsv.io/managed'] === 'true' &&
     policy?.metadata?.labels?.['cars.bsv.io/project-id'] === projectId &&
-    JSON.stringify(policy?.spec) === JSON.stringify(expected.spec);
+    canonicalJson(policy?.spec) === canonicalJson(expected.spec);
 }
 
 async function ensure(projectId: string): Promise<void> {
