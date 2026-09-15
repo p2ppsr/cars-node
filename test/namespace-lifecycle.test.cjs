@@ -8,6 +8,7 @@ const {
   bindingIsValid,
   namespaceIsValid,
   networkPolicyIsValid,
+  verifyNamespaceLifecyclePermissions,
 } = require('../dist/src/namespace-lifecycle-server.js')
 const { assertProjectId } = require('../dist/src/namespace-lifecycle.js')
 
@@ -57,4 +58,25 @@ test('lifecycle rejects names outside the 32-hex project boundary', () => {
   assert.doesNotThrow(() => assertProjectId(projectId))
   assert.throws(() => assertProjectId('../kube-system'))
   assert.throws(() => assertProjectId('ABCDEF0123456789ABCDEF0123456789'))
+})
+
+test('lifecycle permission readiness is bounded and concurrent', async () => {
+  let active = 0
+  let maximumActive = 0
+  let calls = 0
+  await verifyNamespaceLifecyclePermissions(async () => {
+    calls += 1
+    active += 1
+    maximumActive = Math.max(maximumActive, active)
+    await new Promise(resolve => setImmediate(resolve))
+    active -= 1
+    return 'yes\n'
+  })
+  assert.equal(calls, 12)
+  assert.equal(maximumActive, 12)
+
+  await assert.rejects(
+    verifyNamespaceLifecyclePermissions(async check => check[0] === 'delete' ? 'no\n' : 'yes\n'),
+    /ServiceAccount cannot delete namespaces/,
+  )
 })
