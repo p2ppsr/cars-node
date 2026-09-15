@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import 'express-async-errors';
 import express from 'express';
+import { rateLimit } from 'express-rate-limit';
 import logger from './logger';
 import { assertProjectId } from './namespace-lifecycle';
 
@@ -86,6 +87,55 @@ function runKubectl(args: string[], input?: object, timeoutMs = 120000): Promise
     if (input) child.stdin.end(JSON.stringify(input));
     else child.stdin.end();
   });
+}
+
+const readinessAuthorizationChecks = [
+  ['create', 'namespaces'],
+  ['patch', 'namespaces'],
+  ['delete', 'namespaces'],
+  ['list', 'namespaces'],
+  ['create', 'rolebindings', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+  ['get', 'rolebindings', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+  ['patch', 'rolebindings', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+  ['list', 'rolebindings', '--all-namespaces'],
+  ['create', 'networkpolicies.networking.k8s.io', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+  ['get', 'networkpolicies.networking.k8s.io', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+  ['patch', 'networkpolicies.networking.k8s.io', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+  ['list', 'networkpolicies.networking.k8s.io', '--all-namespaces'],
+];
+
+type AuthorizationCheck = (check: string[]) => Promise<string>;
+
+async function runAuthorizationCheck(check: string[]): Promise<string> {
+  return runKubectl(['auth', 'can-i', ...check], undefined, 10000);
+}
+
+export async function verifyNamespaceLifecyclePermissions(
+  checkAuthorization: AuthorizationCheck = runAuthorizationCheck,
+): Promise<void> {
+  const results = await Promise.all(readinessAuthorizationChecks.map(async check => ({
+    check,
+    allowed: (await checkAuthorization(check)).trim(),
+  })));
+  const denied = results.find(result => result.allowed !== 'yes');
+  if (denied) throw new Error(`ServiceAccount cannot ${denied.check[0]} ${denied.check[1]}`);
+}
+
+let readinessValidUntil = 0;
+let readinessPromise: Promise<void> | undefined;
+
+async function verifyCachedNamespaceLifecyclePermissions(): Promise<void> {
+  if (Date.now() < readinessValidUntil) return;
+  if (!readinessPromise) {
+    readinessPromise = verifyNamespaceLifecyclePermissions()
+      .then(() => {
+        readinessValidUntil = Date.now() + 30000;
+      })
+      .finally(() => {
+        readinessPromise = undefined;
+      });
+  }
+  return readinessPromise;
 }
 
 function namespaceDocument(projectId: string) {
@@ -347,28 +397,18 @@ async function main() {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '256kb' }));
+  app.use(rateLimit({
+    windowMs: 60 * 1000,
+    limit: 60,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: 'Too many namespace-lifecycle requests' },
+  }));
 
   app.get('/health/live', (_req, res) => res.json({ status: 'ok', live: true }));
   app.get('/health/ready', async (_req, res) => {
     try {
-      const checks = [
-        ['create', 'namespaces'],
-        ['patch', 'namespaces'],
-        ['delete', 'namespaces'],
-        ['list', 'namespaces'],
-        ['create', 'rolebindings', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
-        ['get', 'rolebindings', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
-        ['patch', 'rolebindings', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
-        ['list', 'rolebindings', '--all-namespaces'],
-        ['create', 'networkpolicies.networking.k8s.io', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
-        ['get', 'networkpolicies.networking.k8s.io', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
-        ['patch', 'networkpolicies.networking.k8s.io', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
-        ['list', 'networkpolicies.networking.k8s.io', '--all-namespaces'],
-      ];
-      for (const check of checks) {
-        const allowed = (await runKubectl(['auth', 'can-i', ...check])).trim();
-        if (allowed !== 'yes') throw new Error(`ServiceAccount cannot ${check[0]} ${check[1]}`);
-      }
+      await verifyCachedNamespaceLifecyclePermissions();
       res.json({ status: 'ok', ready: true });
     } catch {
       res.status(503).json({ status: 'error', ready: false });
