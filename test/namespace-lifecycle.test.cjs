@@ -39,6 +39,12 @@ test('lifecycle documents bind only the canonical CARS runtime identity', () => 
   assert.equal(policy.spec.egress.some(rule => rule.ports?.some(port => port.port === 3306)), true)
   assert.equal(policy.spec.egress.some(rule => rule.ports?.some(port => port.port === 27017)), true)
   assert.equal(networkPolicyIsValid(policy, projectId), true)
+  const kubernetesNormalized = structuredClone(policy)
+  kubernetesNormalized.spec.egress[1] = {
+    ports: kubernetesNormalized.spec.egress[1].ports,
+    to: kubernetesNormalized.spec.egress[1].to,
+  }
+  assert.equal(networkPolicyIsValid(kubernetesNormalized, projectId), true)
   policy.spec.egress[policy.spec.egress.length - 1].ports.push({ protocol: 'TCP', port: 22 })
   assert.equal(networkPolicyIsValid(policy, projectId), false)
   binding.subjects.push({ kind: 'ServiceAccount', name: 'unexpected', namespace: 'default' })
