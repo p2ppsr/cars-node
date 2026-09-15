@@ -649,7 +649,7 @@ spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
       {{- if and .Values.frontendImage (not .Values.backendImage) }}
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 60
       {{- end }}
       securityContext:
         fsGroup: 65532
@@ -838,7 +838,7 @@ ${propagationProviderEnv}        - name: KNEX_URL
         lifecycle:
           preStop:
             sleep:
-              seconds: 10
+              seconds: 30
         {{- end }}
         securityContext:
           allowPrivilegeEscalation: false

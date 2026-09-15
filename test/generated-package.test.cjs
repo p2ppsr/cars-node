@@ -55,6 +55,22 @@ test('combined project Pods keep frontend and backend listeners distinct', () =>
   )
 })
 
+test('generated static frontends drain from Gateway endpoints before exit', () => {
+  const uploadSource = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'routes', 'upload.ts'),
+    'utf8'
+  )
+
+  assert.match(
+    uploadSource,
+    /if and \.Values\.frontendImage \(not \.Values\.backendImage\) \}\}[\s\S]*?terminationGracePeriodSeconds: 60/
+  )
+  assert.match(
+    uploadSource,
+    /if not \.Values\.backendImage \}\}[\s\S]*?preStop:[\s\S]*?sleep:[\s\S]*?seconds: 30/
+  )
+})
+
 test('only configured compatibility hosts become public discovery roots', () => {
   const { isPublicDiscoveryRoot } = require('../dist/src/public-discovery-root.js')
 
