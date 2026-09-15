@@ -9,6 +9,7 @@ const serviceAccountName = process.env.CARS_RUNTIME_SERVICE_ACCOUNT || 'cars-ope
 const serviceAccountNamespace = process.env.CARS_RUNTIME_SERVICE_ACCOUNT_NAMESPACE || 'cars-operator-system';
 const roleName = process.env.CARS_PROJECT_RUNTIME_ROLE || 'cars-project-runtime';
 const bindingName = process.env.CARS_PROJECT_RUNTIME_BINDING || 'cars-project-runtime';
+const networkPolicyName = 'cars-tenant-baseline';
 const namespacePrefix = 'cars-project-';
 const requiredNamespaceLabels = {
   'app.kubernetes.io/managed-by': 'cars-namespace-lifecycle',
@@ -127,6 +128,89 @@ function bindingDocument(projectId: string) {
   };
 }
 
+function networkPolicyDocument(projectId: string) {
+  const namespace = namespaceName(projectId);
+  return {
+    apiVersion: 'networking.k8s.io/v1',
+    kind: 'NetworkPolicy',
+    metadata: {
+      name: networkPolicyName,
+      namespace,
+      labels: {
+        'app.kubernetes.io/managed-by': 'cars-namespace-lifecycle',
+        'cars.bsv.io/managed': 'true',
+        'cars.bsv.io/project-id': projectId,
+      },
+    },
+    spec: {
+      podSelector: {},
+      policyTypes: ['Ingress', 'Egress'],
+      ingress: [{
+        from: [
+          { podSelector: {} },
+          { namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'ingress' } } },
+          { namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'envoy-gateway-system' } } },
+          { namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'cars-operator-system' } } },
+        ],
+      }],
+      egress: [
+        { to: [{ podSelector: {} }] },
+        {
+          to: [{
+            namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } },
+            podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } },
+          }],
+          ports: [
+            { protocol: 'UDP', port: 53 },
+            { protocol: 'TCP', port: 53 },
+          ],
+        },
+        {
+          to: [{
+            namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'cars-operator-system' } },
+            podSelector: {
+              matchLabels: {
+                'app.kubernetes.io/component': 'haproxy',
+                'app.kubernetes.io/instance': 'shared-mysql',
+              },
+            },
+          }],
+          ports: [{ protocol: 'TCP', port: 3306 }],
+        },
+        {
+          to: [{
+            namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'cars-operator-system' } },
+            podSelector: { matchLabels: { app: 'shared-mongo' } },
+          }],
+          ports: [{ protocol: 'TCP', port: 27017 }],
+        },
+        {
+          to: [{
+            ipBlock: {
+              cidr: '0.0.0.0/0',
+              except: [
+                '10.0.0.0/8',
+                '100.64.0.0/10',
+                '127.0.0.0/8',
+                '169.254.0.0/16',
+                '172.16.0.0/12',
+                '192.168.0.0/16',
+                '224.0.0.0/4',
+                '240.0.0.0/4',
+              ],
+            },
+          }],
+          ports: [
+            { protocol: 'TCP', port: 80 },
+            { protocol: 'TCP', port: 443 },
+            { protocol: 'UDP', port: 443 },
+          ],
+        },
+      ],
+    },
+  };
+}
+
 async function apply(document: object): Promise<void> {
   await runKubectl(['apply', '--server-side', '--field-manager=cars-namespace-lifecycle', '-f', '-'], document);
 }
@@ -154,12 +238,27 @@ function namespaceIsValid(namespace: any, projectId: string): boolean {
     Object.entries(requiredNamespaceLabels).every(([key, value]) => labels[key] === value);
 }
 
+function networkPolicyIsValid(policy: any, projectId: string): boolean {
+  const expected = networkPolicyDocument(projectId);
+  return policy?.metadata?.name === networkPolicyName &&
+    policy?.metadata?.namespace === namespaceName(projectId) &&
+    policy?.metadata?.labels?.['app.kubernetes.io/managed-by'] === 'cars-namespace-lifecycle' &&
+    policy?.metadata?.labels?.['cars.bsv.io/managed'] === 'true' &&
+    policy?.metadata?.labels?.['cars.bsv.io/project-id'] === projectId &&
+    JSON.stringify(policy?.spec) === JSON.stringify(expected.spec);
+}
+
 async function ensure(projectId: string): Promise<void> {
   await apply(namespaceDocument(projectId));
   await apply(bindingDocument(projectId));
+  await apply(networkPolicyDocument(projectId));
   const raw = await runKubectl(['-n', namespaceName(projectId), 'get', 'rolebinding', bindingName, '-o', 'json']);
   if (!bindingIsValid(JSON.parse(raw), projectId)) {
     throw new Error(`RoleBinding verification failed for ${namespaceName(projectId)}`);
+  }
+  const policyRaw = await runKubectl(['-n', namespaceName(projectId), 'get', 'networkpolicy', networkPolicyName, '-o', 'json']);
+  if (!networkPolicyIsValid(JSON.parse(policyRaw), projectId)) {
+    throw new Error(`NetworkPolicy verification failed for ${namespaceName(projectId)}`);
   }
 }
 
@@ -181,6 +280,7 @@ async function audit(projectIds: string[]) {
   }));
   const namespaceList = JSON.parse(await runKubectl(['get', 'namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
   const bindingList = JSON.parse(await runKubectl(['get', 'rolebindings', '--all-namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
+  const policyList = JSON.parse(await runKubectl(['get', 'networkpolicies', '--all-namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
   const namespaceByName = new Map<string, any>((namespaceList.items || [])
     .map((item: any) => [item?.metadata?.name, item] as const)
     .filter(([name]) => Boolean(name)));
@@ -188,6 +288,10 @@ async function audit(projectIds: string[]) {
   const bindingByNamespace = new Map<string, any>();
   for (const binding of bindingList.items || []) {
     if (binding?.metadata?.name === bindingName) bindingByNamespace.set(binding.metadata.namespace, binding);
+  }
+  const policyByNamespace = new Map<string, any>();
+  for (const policy of policyList.items || []) {
+    if (policy?.metadata?.name === networkPolicyName) policyByNamespace.set(policy.metadata.namespace, policy);
   }
   const missingNamespaces = [...expected].filter(name => !managed.has(name)).sort();
   const orphanNamespaces = [...managed].filter(name => !expected.has(name)).sort();
@@ -199,18 +303,30 @@ async function audit(projectIds: string[]) {
     .filter(name => managed.has(name))
     .filter(name => !bindingIsValid(bindingByNamespace.get(name), name.slice(namespacePrefix.length)))
     .sort();
+  const invalidNetworkPolicies = [...expected]
+    .filter(name => managed.has(name))
+    .filter(name => !networkPolicyIsValid(policyByNamespace.get(name), name.slice(namespacePrefix.length)))
+    .sort();
   return {
-    status: missingNamespaces.length || orphanNamespaces.length || invalidNamespaces.length || invalidBindings.length ? 'error' : 'ok',
+    status: missingNamespaces.length || orphanNamespaces.length || invalidNamespaces.length || invalidBindings.length || invalidNetworkPolicies.length ? 'error' : 'ok',
     expectedProjects: expected.size,
     managedNamespaces: managed.size,
     missingNamespaces,
     orphanNamespaces,
     invalidNamespaces,
     invalidBindings,
+    invalidNetworkPolicies,
   };
 }
 
-export { namespaceDocument, bindingDocument, bindingIsValid, namespaceIsValid };
+export {
+  namespaceDocument,
+  bindingDocument,
+  networkPolicyDocument,
+  bindingIsValid,
+  namespaceIsValid,
+  networkPolicyIsValid,
+};
 
 async function main() {
   token();
@@ -231,6 +347,10 @@ async function main() {
         ['get', 'rolebindings', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
         ['patch', 'rolebindings', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
         ['list', 'rolebindings', '--all-namespaces'],
+        ['create', 'networkpolicies.networking.k8s.io', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+        ['get', 'networkpolicies.networking.k8s.io', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+        ['patch', 'networkpolicies.networking.k8s.io', '--namespace', `${namespacePrefix}${'0'.repeat(32)}`],
+        ['list', 'networkpolicies.networking.k8s.io', '--all-namespaces'],
       ];
       for (const check of checks) {
         const allowed = (await runKubectl(['auth', 'can-i', ...check])).trim();
