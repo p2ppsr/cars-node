@@ -207,7 +207,7 @@ test('control-plane image and deploy path pin and verify the production supply c
     'utf8'
   )
 
-  assert.match(dockerfile, /buildah\/stable:v1\.43\.2@sha256:[0-9a-f]{64}/)
+  assert.match(dockerfile, /buildah\/stable:v1\.43\.4-immutable@sha256:[0-9a-f]{64}/)
   assert.match(dockerfile, /ARG NODE_VERSION=24\.19\.0/)
   assert.match(dockerfile, /ARG GO_VERSION=1\.26\.6/)
   assert.match(dockerfile, /ARG GO_SHA256=[0-9a-f]{64}/)
