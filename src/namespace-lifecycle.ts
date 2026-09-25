@@ -47,9 +47,9 @@ function timeoutMs(): number {
   return Number.isFinite(configured) ? Math.max(1000, Math.min(120000, Math.trunc(configured))) : 30000;
 }
 
-async function request(path: string, options: RequestInit = {}, acceptedStatuses: number[] = []): Promise<any> {
+async function request(path: string, options: RequestInit = {}, acceptedStatuses: number[] = [], deadlineMs = timeoutMs()): Promise<any> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs());
+  const timeout = setTimeout(() => controller.abort(), deadlineMs);
   try {
     const response = await fetch(`${lifecycleBaseUrl()}${path}`, {
       ...options,
@@ -89,16 +89,18 @@ export async function ensureProjectNamespace(projectId: string): Promise<void> {
 
 export async function deleteProjectNamespace(projectId: string): Promise<void> {
   assertProjectId(projectId);
-  await request(`/v1/projects/${projectId}`, { method: 'DELETE' });
+  // The controller allows 120s for Kubernetes deletion plus command cleanup.
+  // Static frontends deliberately drain for 30s before exiting.
+  await request(`/v1/projects/${projectId}`, { method: 'DELETE' }, [], 150_000);
 }
 
-export async function auditProjectNamespaces(projectIds: string[]): Promise<NamespaceAudit> {
+export async function auditProjectNamespaces(projectIds: string[], deletingProjectIds: string[] = []): Promise<NamespaceAudit> {
   for (const projectId of projectIds) {
     assertProjectId(projectId);
   }
   const payload = await request('/v1/audit', {
     method: 'POST',
-    body: JSON.stringify({ projectIds }),
+    body: JSON.stringify({ projectIds, deletingProjectIds }),
   }, [409]);
   return payload as NamespaceAudit;
 }

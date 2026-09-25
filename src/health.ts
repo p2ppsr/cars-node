@@ -3,6 +3,7 @@ import axios from 'axios';
 import type { Knex } from 'knex';
 import { getProjectDbMode, getSharedDbConfig } from './shared-db';
 import { assertProjectId, auditProjectNamespaces } from './namespace-lifecycle';
+import { activeDeletionIds } from './project-deletion';
 
 type HealthStatus = 'ok' | 'degraded' | 'error';
 
@@ -186,7 +187,7 @@ export async function collectSystemHealth(db: Knex, options: {
     teratestnetWalletConfigured?: boolean;
     teratestnetWalletReady?: boolean;
     migrationsComplete: boolean;
-    namespaceLifecycleCheck?: (projectIds: string[]) => Promise<any>;
+    namespaceLifecycleCheck?: (projectIds: string[], deletingProjectIds?: string[]) => Promise<any>;
     buildControllerCheck?: () => Promise<any>;
 }) {
     const checks = await Promise.all([
@@ -246,9 +247,18 @@ export async function collectSystemHealth(db: Knex, options: {
             readinessCritical: true,
             livenessCritical: false,
             handler: async () => {
-                const projectRows = await db('projects').select('project_uuid');
+                const projectRows = await db('projects').select('project_uuid', 'deletion_requested_at');
                 const projectIds = projectRows.map((row: any) => String(row.project_uuid));
-                const report = await (options.namespaceLifecycleCheck || auditProjectNamespaces)(projectIds);
+                const audit = options.namespaceLifecycleCheck || auditProjectNamespaces;
+                let report = await audit(projectIds, activeDeletionIds(projectRows));
+                // Database intent and Kubernetes snapshots are separate reads.
+                // Recheck a changing inventory once, never waive stable drift.
+                if (report.status !== 'ok') {
+                    const current = await db('projects').select('project_uuid', 'deletion_requested_at');
+                    if (JSON.stringify(current) !== JSON.stringify(projectRows)) {
+                        report = await audit(current.map((row: any) => String(row.project_uuid)), activeDeletionIds(current));
+                    }
+                }
                 return {
                     status: report.status === 'ok' ? 'ok' : 'error',
                     message: report.status === 'ok' ? undefined : 'CARS project namespace drift detected',

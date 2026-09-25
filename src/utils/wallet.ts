@@ -107,6 +107,7 @@ export function walletForProjectNetwork(wallets: ProjectWallets, network: Projec
 export async function checkAndFundProjectKeys(db: Knex, wallets: ProjectWallets) {
     const projects = await db('projects')
         .select('projects.*')
+        .whereNull('deletion_requested_at')
         .where('balance', '>', 0);
 
     for (const project of projects) {

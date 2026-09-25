@@ -60,7 +60,7 @@ function getCrossedThresholds(oldBalance: number, newBalance: number, alreadyNot
 }
 
 export async function billProjects() {
-    const projects = await db('projects').select('*');
+    const projects = await db('projects').whereNull('deletion_requested_at').select('*');
 
     for (const project of projects) {
         const namespace = `cars-project-${project.project_uuid}`;

@@ -217,6 +217,9 @@ export default async (req: Request, res: Response) => {
       counterparty: 'self'
     });
     if (!valid) return res.status(401).json({ error: 'Invalid signature' });
+    if (project.deletion_requested_at) {
+      return res.status(409).json({ error: 'Project deletion is in progress', code: 'CARS_PROJECT_DELETING' });
+    }
 
     workspaceRoot = deploymentWorkspaceRoot(project.project_uuid, deploymentId);
     filePath = path.join(workspaceRoot, 'artifact.tgz');

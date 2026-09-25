@@ -17,6 +17,8 @@ import {
     logLifecycleFailure,
 } from '../namespace-lifecycle';
 
+import { requestProjectDeletion, completeProjectDeletion } from '../project-deletion';
+
 const router = Router();
 
 const VALID_LOG_PERIODS = ['5m', '15m', '30m', '1h', '2h', '6h', '12h', '1d', '2d', '7d'] as const;
@@ -108,6 +110,9 @@ async function requireProjectAdmin(req: Request, res: Response, next: Function) 
     if (!admin) {
         logger.warn({ identityKey, projectId: project.project_uuid }, 'User is not admin of project');
         return res.status(403).json({ error: 'User not admin' });
+    }
+    if (project.deletion_requested_at && !req.path.endsWith('/delete')) {
+        return res.status(409).json({ error: 'Project deletion is in progress', code: 'CARS_PROJECT_DELETING' });
     }
     next();
 }
@@ -669,71 +674,20 @@ router.post('/:projectId/delete', requireRegisteredUser, requireProject, require
     const project = (req as any).project;
     const user = (req as any).user;
 
+    await requestProjectDeletion(db, project.project_uuid, user.identity_key);
     try {
-        await deleteProjectNamespace(project.project_uuid);
-    } catch (error: any) {
-        logLifecycleFailure(error, {
-            projectId: project.project_uuid,
-            requestId: (req as any).requestId,
+        const completed = await completeProjectDeletion(db, project.project_uuid);
+        if (!completed) return res.status(503).json({
+            error: 'Project deletion is already in progress; retry to confirm completion',
+            code: 'CARS_PROJECT_DELETE_PENDING',
         });
+    } catch (error: any) {
+        logLifecycleFailure(error, { projectId: project.project_uuid, requestId: (req as any).requestId });
         return res.status(503).json({
-            error: 'CARS could not remove the project namespace; the project record was preserved',
-            code: 'CARS_NAMESPACE_DELETE_FAILED',
+            error: 'Project deletion is recorded and will be reconciled automatically; retry to confirm completion',
+            code: 'CARS_PROJECT_DELETE_PENDING',
             requestId: (req as any).requestId,
         });
-    }
-
-    // Gather admins
-    const admins = await db('project_admins')
-        .join('users', 'users.identity_key', 'project_admins.identity_key')
-        .where({ 'project_admins.project_id': project.id })
-        .select('users.email', 'users.identity_key');
-
-    const emails = admins.map((a: any) => a.email);
-
-    try {
-        await db.transaction(async trx => {
-            await trx('project_accounting').where({ project_id: project.id }).del();
-            await trx('deploys').where({ project_id: project.id }).del();
-            await trx('project_admins').where({ project_id: project.id }).del();
-            await trx('logs').where({ project_id: project.id }).del();
-            await trx('projects').where({ id: project.id }).del();
-        });
-    } catch (error: any) {
-        logger.error({
-            projectId: project.project_uuid,
-            requestId: (req as any).requestId,
-            error: error.message,
-            splitBrain: true,
-            alert: 'cars.project_delete.database_cleanup_failed',
-        }, 'Project namespace was removed but database cleanup failed');
-        return res.status(503).json({
-            error: 'Project resources were removed, but CARS reconciliation is required',
-            code: 'CARS_PROJECT_DELETE_RECONCILIATION_REQUIRED',
-            requestId: (req as any).requestId,
-        });
-    }
-
-    const subject = `Project Deleted: ${project.name}`;
-    const body = `Hello,
-
-Project "${project.name}" (ID: ${project.project_uuid}) has been deleted.
-
-Originated by: ${user.identity_key} (${user.email})
-
-All resources have been removed.
-
-Regards,
-CARS System`;
-    try {
-        await sendAdminNotificationEmail(emails, project, body, subject);
-    } catch (error: any) {
-        logger.error({
-            projectId: project.project_uuid,
-            requestId: (req as any).requestId,
-            error: error.message,
-            alert: 'cars.project_delete.notification_failed',
-        }, 'Project deletion notification failed after successful deletion');
     }
 
     res.json({ message: 'Project deleted' });
