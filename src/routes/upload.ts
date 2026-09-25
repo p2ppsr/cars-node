@@ -217,6 +217,9 @@ export default async (req: Request, res: Response) => {
       counterparty: 'self'
     });
     if (!valid) return res.status(401).json({ error: 'Invalid signature' });
+    if (project.deletion_requested_at) {
+      return res.status(409).json({ error: 'Project deletion is in progress', code: 'CARS_PROJECT_DELETING' });
+    }
 
     workspaceRoot = deploymentWorkspaceRoot(project.project_uuid, deploymentId);
     filePath = path.join(workspaceRoot, 'artifact.tgz');
@@ -233,24 +236,28 @@ export default async (req: Request, res: Response) => {
       }
     }
 
-    // Namespace existence and the exact runtime RoleBinding are controller-owned.
-    // Fail before accepting/building an artifact when that contract cannot be proven.
-    await ensureProjectNamespace(project.project_uuid);
-
     // 4) Check project balance before accepting the upload body.
     if (project.balance < 1) {
       return res.status(401).json({ error: `Project balance must be at least 1 satoshi to upload a deployment. Current balance: ${project.balance}` });
     }
 
-    const claimedRows = await db('deploys').where({ id: deploy.id, status: 'pending' }).update({
-      status: 'uploading',
-      error_message: null,
-      accepted_at: db.fn.now(),
+    const claimedRows = await db.transaction(async trx => {
+      const current = await trx('projects').where({ id: project.id }).forUpdate().first();
+      if (!current || current.deletion_requested_at) return -1;
+      return trx('deploys').where({ id: deploy.id, status: 'pending' }).update({
+        status: 'uploading', error_message: null, accepted_at: trx.fn.now(),
+      });
     });
+    if (claimedRows === -1) return res.status(409).json({ error: 'Project deletion is in progress', code: 'CARS_PROJECT_DELETING' });
     if (Number(claimedRows) !== 1) {
       return res.status(409).json({ error: 'Deployment upload URL has already been used' });
     }
     claimed = true;
+
+    // Prove the controller-owned namespace contract before accepting the body.
+    // The claimed deployment now prevents a concurrent project deletion from
+    // removing a namespace that this upload could otherwise recreate.
+    await ensureProjectNamespace(project.project_uuid);
 
     // 5) Stream the bounded authenticated artifact to a private scratch volume.
     const bytesWritten = await writeUploadToFile(req, filePath);

@@ -336,14 +336,23 @@ async function remove(projectId: string): Promise<void> {
   }
 }
 
-async function audit(projectIds: string[]) {
+async function audit(projectIds: string[], deletingProjectIds: string[] = []) {
+  const namespaceList = JSON.parse(await runKubectl(['get', 'namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
+  const bindingList = JSON.parse(await runKubectl(['get', 'rolebindings', '--all-namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
+  const policyList = JSON.parse(await runKubectl(['get', 'networkpolicies', '--all-namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
+  return namespaceInventoryReport(projectIds, deletingProjectIds, namespaceList, bindingList, policyList);
+}
+
+export function namespaceInventoryReport(projectIds: string[], deletingProjectIds: string[], namespaceList: any, bindingList: any, policyList: any) {
   const expected = new Set(projectIds.map(projectId => {
     assertProjectId(projectId);
     return namespaceName(projectId);
   }));
-  const namespaceList = JSON.parse(await runKubectl(['get', 'namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
-  const bindingList = JSON.parse(await runKubectl(['get', 'rolebindings', '--all-namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
-  const policyList = JSON.parse(await runKubectl(['get', 'networkpolicies', '--all-namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
+  const deleting = new Set(deletingProjectIds.map(projectId => {
+    const name = namespaceName(projectId);
+    if (!expected.has(name)) throw new Error('Deletion transition must belong to an expected project');
+    return name;
+  }));
   const namespaceByName = new Map<string, any>((namespaceList.items || [])
     .map((item: any) => [item?.metadata?.name, item] as const)
     .filter(([name]) => Boolean(name)));
@@ -356,7 +365,7 @@ async function audit(projectIds: string[]) {
   for (const policy of policyList.items || []) {
     if (policy?.metadata?.name === networkPolicyName) policyByNamespace.set(policy.metadata.namespace, policy);
   }
-  const missingNamespaces = [...expected].filter(name => !managed.has(name)).sort();
+  const missingNamespaces = [...expected].filter(name => !managed.has(name) && !deleting.has(name)).sort();
   const orphanNamespaces = [...managed].filter(name => !expected.has(name)).sort();
   const invalidNamespaces = [...expected]
     .filter(name => managed.has(name))
@@ -364,10 +373,12 @@ async function audit(projectIds: string[]) {
     .sort();
   const invalidBindings = [...expected]
     .filter(name => managed.has(name))
+    .filter(name => !deleting.has(name) || bindingByNamespace.has(name))
     .filter(name => !bindingIsValid(bindingByNamespace.get(name), name.slice(namespacePrefix.length)))
     .sort();
   const invalidNetworkPolicies = [...expected]
     .filter(name => managed.has(name))
+    .filter(name => !deleting.has(name) || policyByNamespace.has(name))
     .filter(name => !networkPolicyIsValid(policyByNamespace.get(name), name.slice(namespacePrefix.length)))
     .sort();
   return {
@@ -379,6 +390,7 @@ async function audit(projectIds: string[]) {
     invalidNamespaces,
     invalidBindings,
     invalidNetworkPolicies,
+    deletingNamespaces: [...deleting].sort(),
   };
 }
 
@@ -444,7 +456,11 @@ async function main() {
       ) {
         return res.status(400).json({ error: 'projectIds must be an array' });
       }
-      const report = await audit(req.body.projectIds);
+      const deleting = req.body.deletingProjectIds ?? [];
+      if (!Array.isArray(deleting) || deleting.length > 10000 || deleting.some(id => typeof id !== 'string' || !req.body.projectIds.includes(id))) {
+        return res.status(400).json({ error: 'deletingProjectIds must be a subset of projectIds' });
+      }
+      const report = await audit(req.body.projectIds, deleting);
       res.status(report.status === 'ok' ? 200 : 409).json(report);
     } catch (error: any) {
       logger.error({ error: error.message, alert: 'cars.namespace_lifecycle.audit_failed' }, 'Namespace lifecycle audit failed');

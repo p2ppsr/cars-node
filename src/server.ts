@@ -11,6 +11,7 @@ import upload from './routes/upload';
 import publicRoute from './routes/public';
 import globalEviction from './routes/globalEviction';
 import { startCronJobs } from './cron';
+import { startProjectDeletionReconciler } from './project-deletion';
 import timeout from 'connect-timeout';
 import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
@@ -131,6 +132,7 @@ async function main() {
     const authSessionManager = new KnexSessionManager(db);
 
     startCronJobs(db, projectWallets);
+    startProjectDeletionReconciler(db);
 
     const app = express();
     app.disable('x-powered-by');

@@ -1,6 +1,6 @@
-# The publisher rebuilds this version tag; prior manifests have been removed
-# upstream. Pin the reviewed September 14 index, never a floating tag.
-ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.2@sha256:2d2992785d226ffb6ef07f10bb3894d4b9997b86065a662245ca0a7a6028e79d
+# Use the publisher's immutable patch-release image and verify the installed
+# Buildah version after OS security updates. Verified September 25, 2026.
+ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.4-immutable@sha256:6f237dd57d662fe3e86e6d5cae018585173913783d3a4480d729fc8b92247487
 
 FROM ${BUILDAH_IMAGE} AS node-tools
 
@@ -127,7 +127,7 @@ RUN install -d -m 0755 /app/src/migrations && \
     test "$(node --version)" = "v24.19.0" && \
     test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11+cars.1" && \
     test "$(helm version --template '{{.Version}}')" = "v4.2.4+cars-patched-go1.26.6" && \
-    buildah --version | grep -F 'buildah version 1.43.2'
+    buildah --version | grep -F 'buildah version 1.43.4'
 
 ENV CARS_MIGRATIONS_DIR=/app/src/migrations
 
