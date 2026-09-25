@@ -130,7 +130,7 @@ test('runtime cluster tools are rebuilt from pinned modules with patched depende
   const helmModule = fs.readFileSync(path.join(__dirname, '..', 'tools', 'helm', 'go.mod'), 'utf8');
   const kubectlModule = fs.readFileSync(path.join(__dirname, '..', 'tools', 'kubectl', 'go.mod'), 'utf8');
   assert.match(dockerfile, /GO_VERSION=1\.26\.6/);
-  assert.match(dockerfile, /BUILDAH_IMAGE=quay\.io\/buildah\/stable:v1\.43\.2@sha256:2d2992785d226ffb6ef07f10bb3894d4b9997b86065a662245ca0a7a6028e79d/);
+  assert.match(dockerfile, /BUILDAH_IMAGE=quay\.io\/buildah\/stable:v1\.43\.2@sha256:704af5d17babbd88bd93c06ecea7554001a2e9570e1fd54687188d3ae5de0e55/);
   assert.match(dockerfile, /go mod verify/);
   assert.match(dockerfile, /v1\.34\.11\+cars\.1/);
   assert.match(dockerfile, /v4\.2\.4\+cars-patched-go1\.26\.6/);
