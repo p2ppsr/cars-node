@@ -6,6 +6,7 @@ import { sendAdminNotificationEmail } from './utils/email';
 // Only an explicitly authorized, recent deletion may explain resources being
 // absent during teardown. A stalled deletion still fails the drift gate.
 export const DELETION_TRANSITION_MS = 5 * 60_000;
+export class ProjectDeletionConflict extends Error {}
 
 export function activeDeletionIds(projects: any[], now = Date.now()): string[] {
   return projects.filter(project => {
@@ -17,9 +18,18 @@ export function activeDeletionIds(projects: any[], now = Date.now()): string[] {
 
 export async function requestProjectDeletion(db: Knex, projectId: string, identityKey: string): Promise<void> {
   assertProjectId(projectId);
-  // A repeated request must not extend the bounded transition indefinitely.
-  await db('projects').where({ project_uuid: projectId }).whereNull('deletion_requested_at').update({
-    deletion_requested_at: db.fn.now(), deletion_requested_by: identityKey,
+  await db.transaction(async trx => {
+    // Upload admission takes this same row lock before claiming a deployment.
+    const project = await trx('projects').where({ project_uuid: projectId }).forUpdate().first();
+    if (!project) throw new ProjectDeletionConflict('Project no longer exists');
+    // A repeated request must not extend the bounded transition indefinitely.
+    if (project.deletion_requested_at) return;
+    const active = await trx('deploys').where({ project_id: project.id })
+      .whereIn('status', ['uploading', 'processing']).first('id');
+    if (active) throw new ProjectDeletionConflict('Wait for the active deployment to finish before deleting the project');
+    await trx('projects').where({ id: project.id }).update({
+      deletion_requested_at: trx.fn.now(), deletion_requested_by: identityKey,
+    });
   });
 }
 

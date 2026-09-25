@@ -17,7 +17,7 @@ import {
     logLifecycleFailure,
 } from '../namespace-lifecycle';
 
-import { requestProjectDeletion, completeProjectDeletion } from '../project-deletion';
+import { requestProjectDeletion, completeProjectDeletion, ProjectDeletionConflict } from '../project-deletion';
 
 const router = Router();
 
@@ -674,7 +674,12 @@ router.post('/:projectId/delete', requireRegisteredUser, requireProject, require
     const project = (req as any).project;
     const user = (req as any).user;
 
-    await requestProjectDeletion(db, project.project_uuid, user.identity_key);
+    try {
+        await requestProjectDeletion(db, project.project_uuid, user.identity_key);
+    } catch (error: any) {
+        if (error instanceof ProjectDeletionConflict) return res.status(409).json({ error: error.message });
+        throw error;
+    }
     try {
         const completed = await completeProjectDeletion(db, project.project_uuid);
         if (!completed) return res.status(503).json({

@@ -6,13 +6,13 @@ const projectId = '0123456789abcdef0123456789abcdef'
 const otherId = 'abcdef0123456789abcdef0123456789'
 const empty = { items: [] }
 
-function fakeDb({ approved = true, locked = false, cleanupFailure = false } = {}) {
+function fakeDb({ approved = true, locked = false, cleanupFailure = false, activeDeployment = false } = {}) {
   const state = { project: { id: 1, project_uuid: projectId, name: 'test', deletion_requested_at: approved ? new Date() : null }, deleted: [], releases: 0, cleanupFailure }
   const db = table => {
     let requiresNull = false
     const query = {
-      where() { return query }, whereNull() { requiresNull = true; return query }, join() { return query },
-      async first() { return state.project ? { ...state.project } : undefined },
+      where() { return query }, forUpdate() { return query }, whereIn() { return query }, whereNull() { requiresNull = true; return query }, join() { return query },
+      async first() { if (table === 'deploys') return activeDeployment ? { id: 2 } : undefined; return state.project ? { ...state.project } : undefined },
       async select() { return [] },
       async update(values) { if (state.project && (!requiresNull || !state.project.deletion_requested_at)) Object.assign(state.project, values); return 1 },
       async del() {
@@ -114,4 +114,11 @@ test('deletion never waives malformed present bindings, policies, labels, or orp
   delete namespace.metadata.labels['cars.bsv.io/project-id']
   assert.equal(namespaceInventoryReport([projectId], [projectId], { items: [namespace] }, empty, empty).status, 'error')
   assert.equal(namespaceInventoryReport([projectId], [projectId], { items: [namespaceDocument(otherId)] }, empty, empty).status, 'error')
+})
+
+test('active uploads block deletion before intent or namespace changes', async () => {
+  const { db, state } = fakeDb({ approved: false, activeDeployment: true })
+  await assert.rejects(requestProjectDeletion(db, projectId, 'admin'), /active deployment/)
+  assert.equal(state.project.deletion_requested_at, null)
+  assert.deepEqual(state.deleted, [])
 })
