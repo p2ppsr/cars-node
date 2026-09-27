@@ -352,6 +352,7 @@ test('generated Node backend policies retire idle connections without changing a
   assert.equal(policies.length, 2)
   for (const policy of policies) {
     assert.match(policy, /connectionIdleTimeout: 4s/)
+    assert.match(policy, /requestTimeout: 21600s/)
     assert.match(policy, /streamIdleTimeout: 21600s/)
     assert.match(policy, /connectTimeout: 300s/)
     assert.match(policy, /ttl: 86400s/)
@@ -373,6 +374,7 @@ test('generated frontend policies retain their existing connection policy', () =
     const policies = generated.split('---\n').filter(document => document.includes('kind: BackendTrafficPolicy'))
     assert.equal(policies.length, backendEnabled ? 2 : 1)
     assert.doesNotMatch(policies[0], /connectionIdleTimeout:/)
+    assert.doesNotMatch(policies[0], /requestTimeout:/)
     assert.match(policies[0], /streamIdleTimeout: 21600s/)
   }
 })
