@@ -35,7 +35,7 @@ test('generated project backends are thin advertisement consumers', () => {
   assert.match(generated, /process\.env\.CARS_PUBLIC_DISCOVERY_ROOT === 'true'/)
   assert.doesNotMatch(generated, /process\.env\.SERVER_PRIVATE_KEY/)
   assert.equal(packageJson.type, 'module')
-  assert.equal(packageJson.dependencies['@bsv/sdk'], '2.6.0')
+  assert.equal(packageJson.dependencies['@bsv/sdk'], '2.8.8')
 })
 
 test('combined project Pods keep frontend and backend listeners distinct', () => {

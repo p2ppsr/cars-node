@@ -213,12 +213,14 @@ export function generatePackageJson(backendDependencies: Record<string, string>)
     "author": "",
     "license": "ISC",
     "dependencies": {
-      ...backendDependencies,
       "@bsv/overlay-express": "2.6.0",
-      "@bsv/sdk": "2.6.0",
+      "@bsv/sdk": "2.8.8",
       "mysql2": "^3.11.5",
       "tsx": "^4.19.2",
-      "chalk": "^5.3.0"
+      "chalk": "^5.3.0",
+      // Application pins must survive generation: its overlay may require
+      // SDK exports that are absent from an older platform default.
+      ...backendDependencies
     },
     "devDependencies": {
       "@types/node": "^22.10.1"
@@ -237,6 +239,7 @@ export function generateDockerfile(enableContracts: boolean) {
 WORKDIR /app
 COPY ./package.json .
 RUN npm i
+RUN node --input-type=module -e "await import('@bsv/overlay-express')"
 COPY ./index.ts .
 COPY ./safe-access-logger.cjs .
 COPY ./tsconfig.json .
