@@ -336,3 +336,43 @@ test('generated frontend routing serves static directory indexes before fallback
     /try_files \$uri\/index\.html \$uri \$uri\.html \/404\.html \/index\.html;/
   )
 })
+
+test('generated Node backend policies retire idle connections without changing active requests or retrying mutations', () => {
+  const { buildProjectGatewayResources } = require('../dist/src/gateway-routes.js')
+  const generated = buildProjectGatewayResources({
+    projectUuid: 'e40be69a5b6200a8f2b23758f2174093',
+    releaseName: 'cars-project-e40be69a5b6200a8f2b23758',
+    frontendEnabled: false,
+    backendEnabled: true,
+    frontendHost: 'unused.example',
+    backendHost: 'backend.example',
+    backendCustomDomain: 'uhrp.bapp.dev'
+  })
+  const policies = generated.split('---\n').filter(document => document.includes('kind: BackendTrafficPolicy'))
+  assert.equal(policies.length, 2)
+  for (const policy of policies) {
+    assert.match(policy, /connectionIdleTimeout: 4s/)
+    assert.match(policy, /streamIdleTimeout: 21600s/)
+    assert.match(policy, /connectTimeout: 300s/)
+    assert.match(policy, /ttl: 86400s/)
+    assert.doesNotMatch(policy, /\n  retry:/)
+  }
+})
+
+test('generated frontend policies retain their existing connection policy', () => {
+  const { buildProjectGatewayResources } = require('../dist/src/gateway-routes.js')
+  for (const backendEnabled of [false, true]) {
+    const generated = buildProjectGatewayResources({
+      projectUuid: '9a52aaaabbbbccccddddeeeeffff0000',
+      releaseName: 'cars-project-example',
+      frontendEnabled: true,
+      backendEnabled,
+      frontendHost: 'app.example',
+      backendHost: 'backend.example'
+    })
+    const policies = generated.split('---\n').filter(document => document.includes('kind: BackendTrafficPolicy'))
+    assert.equal(policies.length, backendEnabled ? 2 : 1)
+    assert.doesNotMatch(policies[0], /connectionIdleTimeout:/)
+    assert.match(policies[0], /streamIdleTimeout: 21600s/)
+  }
+})
