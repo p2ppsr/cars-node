@@ -33,8 +33,9 @@ function routeResources(options: ProjectGatewayOptions, gatewayName: string, hos
   const trafficPolicyName = gatewayObjectName('traffic', httpsRouteName);
   const frontendOnly = port === 80 && options.frontendEnabled && !options.backendEnabled;
   // Generated backends use Node's five-second HTTP keepalive. Retire an idle
-  // Envoy connection first; active requests retain their stream timeout.
-  const connectionIdleTimeout = port === 8080 ? '\n      connectionIdleTimeout: 4s' : '';
+  // Envoy connection first. Set the complete-response budget explicitly;
+  // streamIdleTimeout alone leaves Envoy's default15-second request deadline.
+  const backendTimeouts = port === 8080 ? '\n      connectionIdleTimeout: 4s\n      requestTimeout: 21600s' : '';
   const retry = frontendOnly
     ? `
   retry:
@@ -114,7 +115,7 @@ spec:
       name: ${httpsRouteName}
   timeout:
     http:
-      streamIdleTimeout: 21600s${connectionIdleTimeout}
+      streamIdleTimeout: 21600s${backendTimeouts}
     tcp:
       connectTimeout: ${frontendOnly ? 1 : 300}s
   compressor:
