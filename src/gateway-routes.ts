@@ -32,6 +32,9 @@ function routeResources(options: ProjectGatewayOptions, gatewayName: string, hos
   const httpsRouteName = gatewayObjectName('route', ingressName, host, 'https');
   const trafficPolicyName = gatewayObjectName('traffic', httpsRouteName);
   const frontendOnly = port === 80 && options.frontendEnabled && !options.backendEnabled;
+  // Generated backends use Node's five-second HTTP keepalive. Retire an idle
+  // Envoy connection first; active requests retain their stream timeout.
+  const connectionIdleTimeout = port === 8080 ? '\n      connectionIdleTimeout: 4s' : '';
   const retry = frontendOnly
     ? `
   retry:
@@ -111,7 +114,7 @@ spec:
       name: ${httpsRouteName}
   timeout:
     http:
-      streamIdleTimeout: 21600s
+      streamIdleTimeout: 21600s${connectionIdleTimeout}
     tcp:
       connectTimeout: ${frontendOnly ? 1 : 300}s
   compressor:
