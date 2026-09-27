@@ -59,6 +59,9 @@ export function projectDatabaseUser(projectId: string): string {
 }
 
 export function buildProjectDbCredentials(projectId: string, existingSecret?: Record<string, string>): ProjectDbCredentials {
+  if (existingSecret && (!existingSecret.KNEX_URL || !existingSecret.MONGO_URL)) {
+    throw new Error('Existing project database credentials are incomplete; refusing unsafe credential rotation');
+  }
   const config = getSharedDbConfig();
   const mysqlDatabase = projectDatabaseName(projectId);
   const mongoDatabase = projectDatabaseName(projectId);
@@ -202,16 +205,27 @@ function extractPasswordFromUrl(rawUrl: string | undefined, expectedUser: string
     return undefined;
   }
   try {
+    if (rawUrl.startsWith('mongodb://') || rawUrl.startsWith('mongodb+srv://')) {
+      // MongoDB replica-set seed lists are not WHATWG web URL authorities.
+      // Parse with the driver without connecting, preserving the stored password.
+      const options = new MongoClient(rawUrl).options;
+      if (options.credentials?.username !== expectedUser ||
+          !options.hosts.some(host => host.host === expectedHostHint) ||
+          !options.credentials.password) {
+        throw new Error('Unexpected MongoDB credential identity or host');
+      }
+      return options.credentials.password;
+    }
     const parsed = new URL(rawUrl);
-    if (decodeURIComponent(parsed.username) !== expectedUser) {
-      return undefined;
+    if (parsed.protocol !== 'mysql:' || decodeURIComponent(parsed.username) !== expectedUser ||
+        parsed.hostname !== expectedHostHint || !parsed.password) {
+      throw new Error('Unexpected MySQL credential identity or host');
     }
-    if (!rawUrl.includes(expectedHostHint)) {
-      return undefined;
-    }
-    return decodeURIComponent(parsed.password || '');
+    return decodeURIComponent(parsed.password);
   } catch {
-    return undefined;
+    // Never rotate a database user merely because stored credentials are invalid.
+    // Keep URLs and passwords out of the error returned to deployment logs.
+    throw new Error('Existing project database credentials are invalid; refusing unsafe credential rotation');
   }
 }
 

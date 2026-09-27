@@ -138,6 +138,14 @@ SHARED_MONGO_ADDITIONAL_DATABASES=CARS_lookup_services
 
 `SHARED_MONGO_ADDITIONAL_DATABASES` covers legacy overlay lookup-service databases that are not selected by the `MONGO_URL` path. It defaults to `CARS_lookup_services`; the migration CLI copies those databases without renaming them and grants the per-project Mongo user access so existing lookup services keep working after cutover.
 
+Backend releases reuse both passwords from the existing project connection
+Secret. MongoDB replica-set URLs are parsed by the MongoDB driver, without
+connecting during credential parsing. Missing, malformed, unexpected-user or
+unexpected-host credentials fail closed; they never trigger automatic password
+rotation. For an interrupted release that changed a database login before its
+Secret was installed, an operator must reconcile the database user to the
+verified stored credential before resuming replacement workloads.
+
 The insecure legacy per-project database mode has been retired. CARS accepts only
 `CARS_PROJECT_DB_MODE=shared`, where each project receives unique credentials
 and database-level isolation without namespace-local database administrators.
