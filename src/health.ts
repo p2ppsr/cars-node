@@ -4,6 +4,7 @@ import type { Knex } from 'knex';
 import { getProjectDbMode, getSharedDbConfig } from './shared-db';
 import { assertProjectId, auditProjectNamespaces } from './namespace-lifecycle';
 import { activeDeletionIds } from './project-deletion';
+import { createKubernetesNamespaceReader } from './kubernetes-health';
 
 type HealthStatus = 'ok' | 'degraded' | 'error';
 
@@ -59,8 +60,18 @@ function kubernetesHealthFailureGraceMs() {
 }
 
 let lastKubernetesHealthSuccessAt = 0;
+let namespaceReader: ReturnType<typeof createKubernetesNamespaceReader> | undefined;
 
 async function getCarsNamespace() {
+    if (process.env.KUBERNETES_SERVICE_HOST) {
+        namespaceReader ??= createKubernetesNamespaceReader({
+            host: process.env.KUBERNETES_SERVICE_HOST,
+            port: Number(process.env.KUBERNETES_SERVICE_PORT_HTTPS || 443),
+            serviceAccountDirectory: '/var/run/secrets/kubernetes.io/serviceaccount',
+            timeoutMs: kubernetesHealthTimeoutMs,
+        });
+        return await namespaceReader.read();
+    }
     return await new Promise<any>((resolve, reject) => {
         execFile(
             'kubectl',
