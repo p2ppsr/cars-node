@@ -11,6 +11,7 @@ test('static routing serves root index, permanent aliases and genuine missing-pa
   const config = frontendNginxConfig(8080, {version: 1, mode: 'static', redirects: {'/Contact': '/contact', '/docs': 'https://docs.projectbabbage.com'}})
   assert.match(config, /location = \/Contact \{ return 301 \/contact; \}/)
   assert.match(config, /location = \/docs \{ return 301 https:\/\/docs.projectbabbage.com; \}/)
+  assert.match(config, /absolute_redirect off;/)
   assert.match(config, /error_page 404 \/404.html;/)
   assert.match(config, /try_files \$uri\/index.html \$uri \$uri.html =404;/)
 })
