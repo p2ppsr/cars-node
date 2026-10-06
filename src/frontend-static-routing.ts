@@ -24,6 +24,7 @@ export function frontendNginxConfig(frontendPort: number, routing?: StaticRoutin
     listen ${frontendPort};
     server_name localhost;
     root /usr/share/nginx/html;
+    ${routing ? "absolute_redirect off;" : ""}
 
     gzip on;
     gzip_vary on;
