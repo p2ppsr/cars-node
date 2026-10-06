@@ -485,3 +485,21 @@ You’ve now deployed CARS Node in a small-scale environment with:
 You can now create, deploy, and manage BSV Overlay Services using the CARS CLI against your CARS Node instance, verifying deployments, managing custom domains, tracking logs, and leveraging the cloud-native environment at a small scale.
 
 For future enhancements, consider external load balancers, larger clusters, separate persistence layers, and advanced monitoring for a production-grade environment.
+
+## Prerendered static HTTP routing
+
+Static sites may ship `cars-static-routing.json` in their frontend artifact:
+
+```json
+{
+  "version": 1,
+  "mode": "static",
+  "redirects": {"/Contact": "/contact", "/docs": "https://docs.example.com"}
+}
+```
+
+This requires a prerendered `404.html`. The generated server serves directory
+indexes and flat HTML pages, returns an actual 404 for missing URLs, and applies
+exact-path permanent redirects. Redirect entries must be literal paths or HTTPS
+URLs (no query strings, variables or configuration directives); up to 100 entries
+are allowed. Sites without the manifest retain the existing SPA fallback.
