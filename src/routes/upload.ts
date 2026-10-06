@@ -8,6 +8,7 @@ import type { Knex } from 'knex';
 import logger from '../logger';
 import { extractTarGz } from '../archive';
 import { buildProjectImage } from '../build-controller';
+import { frontendNginxConfig, validateStaticRouting } from '../frontend-static-routing';
 import { runCommand } from '../process';
 import {
   CARSConfig,
@@ -352,51 +353,18 @@ export default async (req: Request, res: Response) => {
         throw new Error(errMsg);
       }
 
+      const staticRoutingPath = path.join(frontendDir, 'cars-static-routing.json');
+      const staticRouting = fs.existsSync(staticRoutingPath)
+        ? validateStaticRouting(readBoundedJson(staticRoutingPath, 'cars-static-routing.json', 16384))
+        : undefined;
+      if (staticRouting && !fs.existsSync(path.join(frontendDir, '404.html'))) {
+        throw new Error('Static routing requires a prerendered 404.html');
+      }
+      // Routing is opt-in; existing SPA deployments preserve their fallback.
       // Add minimal NGINX configuration for static serving
       fs.writeFileSync(
         path.join(frontendDir, 'nginx.conf'),
-        `server {
-    listen ${frontendPort};
-    server_name localhost;
-    root /usr/share/nginx/html;
-
-    gzip on;
-    gzip_vary on;
-    gzip_min_length 1024;
-    gzip_comp_level 6;
-    gzip_types
-        application/javascript
-        application/json
-        application/manifest+json
-        application/rss+xml
-        image/svg+xml
-        text/css
-        text/javascript
-        text/plain
-        text/xml;
-
-    location = /index.html {
-        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
-    }
-
-    location /assets/ {
-        add_header Cache-Control "public, max-age=31536000, immutable";
-        try_files $uri =404;
-    }
-
-    location ~* \\.(?:avif|webp|jpg|jpeg|png|gif|ico|svg|woff2?)$ {
-        add_header Cache-Control "public, max-age=604800, stale-while-revalidate=86400";
-        try_files $uri =404;
-    }
-
-    location / {
-        add_header Cache-Control "no-cache" always;
-        # Serve directory-index and flat route-specific HTML shells before falling
-        # back to the SPA. Directory indexes support static-site generators such as
-        # Astro, while flat shells support routes such as /learn.html.
-        try_files $uri/index.html $uri $uri.html /404.html /index.html;
-    }
-}`
+        frontendNginxConfig(frontendPort, staticRouting)
       );
 
       // Dockerfile for serving static files

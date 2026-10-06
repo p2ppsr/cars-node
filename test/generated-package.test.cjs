@@ -45,7 +45,8 @@ test('combined project Pods keep frontend and backend listeners distinct', () =>
   )
 
   assert.match(uploadSource, /const frontendPort = backendEnabled \? 8081 : 8080/)
-  assert.match(uploadSource, /listen \$\{frontendPort\}/)
+  assert.match(uploadSource, /frontendNginxConfig\(frontendPort, staticRouting\)/)
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'frontend-static-routing.ts'), 'utf8'), /listen \$\{frontendPort\}/)
   assert.match(uploadSource, /EXPOSE \$\{frontendPort\}/)
   assert.match(uploadSource, /containerPort: \{\{ \.Values\.frontendPort \}\}/)
   assert.match(uploadSource, /targetPort: \{\{ \.Values\.frontendPort \}\}/)
@@ -332,7 +333,7 @@ test('generated frontend routing serves static directory indexes before fallback
   )
 
   assert.match(
-    uploadRoute,
+    require('../dist/src/frontend-static-routing.js').frontendNginxConfig(8080),
     /try_files \$uri\/index\.html \$uri \$uri\.html \/404\.html \/index\.html;/
   )
 })
