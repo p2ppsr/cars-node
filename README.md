@@ -360,3 +360,10 @@ The API refreshes system health every ten seconds ahead of its unchanged
 15-second cache expiry. A slow refresh does not extend that freshness bound,
 and completed failed checks replace the cached result immediately. This reduces
 probe latency during ordinary namespace audits without accepting stale health.
+
+The October 18 maintenance image rebuilds the embedded Helm 4.2.4 and kubectl
+1.34.11 tools with Go 1.26.9 and `golang.org/x/net` 0.60.0 (which requires
+`x/text` 0.42.0). The Go archive SHA-256 is pinned to the publisher's download
+manifest. These address the runtime scan findings without exempting the image
+from its HIGH/CRITICAL gate. See the [Go security report](https://pkg.go.dev/vuln/GO-2026-6611)
+and [Go release history](https://go.dev/doc/devel/release#go1.26.9).
