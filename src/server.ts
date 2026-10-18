@@ -255,12 +255,13 @@ async function main() {
         }), 15000);
     const getSystemHealth = () => healthCache.get();
     // Preserve the same 15-second cache limit while refreshing before expiry,
-    // so an ordinary probe need not pay the full namespace-audit latency.
+    // leaving ten seconds for the bounded eight-second read-only API retry
+    // and normal audit work. An expired result still waits for a fresh check.
     const healthRefresh = setInterval(() => {
         void healthCache.refresh().catch(error => {
             logger.error({ error, alert: 'cars.health.refresh_failed' }, 'Health refresh failed');
         });
-    }, 10000);
+    }, 5000);
     healthRefresh.unref();
 
     app.get('/health/live', async (_req, res) => {
