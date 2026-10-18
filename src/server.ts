@@ -24,6 +24,7 @@ import { KnexPaymentReplayStore } from './payment-replay';
 import { advisoryDb } from './advisory-db';
 import { backgroundWorkPaused, backgroundMaintenance } from './background-maintenance';
 import { ActiveOperations } from './maintenance-worker';
+import { HealthCache } from './health-cache';
 
 function positiveInteger(name: string, fallback: number, maximum: number): number {
     const value = Number.parseInt(process.env[name] || String(fallback), 10);
@@ -115,8 +116,6 @@ async function main() {
     backgroundWorkPaused();
     let stopping = false;
     let migrationsComplete = false;
-    let healthCache: { expiresAt: number; report: any } | undefined;
-    let healthInFlight: Promise<any> | undefined;
     let lastHealthAlert = { fingerprint: '', emittedAt: 0 };
 
     // Run migrations
@@ -226,17 +225,13 @@ async function main() {
         next();
     });
 
-    const getSystemHealth = async () => {
-        if (healthCache && healthCache.expiresAt > Date.now()) return healthCache.report;
-        if (healthInFlight) return healthInFlight;
-        healthInFlight = collectSystemHealth(db, {
+    const healthCache = new HealthCache(() => collectSystemHealth(db, {
             mainnetWalletReady: true,
             testnetWalletReady: true,
             teratestnetWalletConfigured: TTN_PRIVATE_KEY != null,
             teratestnetWalletReady: ttnWallet != null,
             migrationsComplete
         }).then(report => {
-            healthCache = { expiresAt: Date.now() + 15000, report };
             const failedChecks = report.checks
                 .filter(check => check.status !== 'ok')
                 .map(check => ({ name: check.name, status: check.status, message: check.message }));
@@ -257,11 +252,16 @@ async function main() {
                 lastHealthAlert = { fingerprint: '', emittedAt: Date.now() };
             }
             return report;
-        }).finally(() => {
-            healthInFlight = undefined;
+        }), 15000);
+    const getSystemHealth = () => healthCache.get();
+    // Preserve the same 15-second cache limit while refreshing before expiry,
+    // so an ordinary probe need not pay the full namespace-audit latency.
+    const healthRefresh = setInterval(() => {
+        void healthCache.refresh().catch(error => {
+            logger.error({ error, alert: 'cars.health.refresh_failed' }, 'Health refresh failed');
         });
-        return healthInFlight;
-    };
+    }, 10000);
+    healthRefresh.unref();
 
     app.get('/health/live', async (_req, res) => {
         const report = await getSystemHealth();
@@ -423,11 +423,13 @@ async function main() {
     const stop = async (signal: string) => {
         if (stopping) return;
         stopping = true;
+        clearInterval(healthRefresh);
         logger.info({ signal, uploads: uploads.count }, 'Finishing accepted CARS work before shutdown');
         // Endpoint withdrawal/preStop precedes SIGTERM. Stop HTTP admission and
         // timer admission, then await handlers that continue beyond HTTP 202.
         await Promise.all([closeHttpServer(server), cron.stop(), deletions.stop()]);
         await uploads.drain();
+        await healthCache.drain();
         if (advisoryDb !== db) await advisoryDb.destroy();
         await db.destroy();
         logger.info('CARS shutdown completed');

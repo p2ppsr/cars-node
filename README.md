@@ -355,3 +355,8 @@ must precede process shutdown.
 Shared Mongo readiness accepts either two Ready data replicas plus the legacy
 arbiter or at least three Ready data replicas without an arbiter. Operators must
 verify actual replication, majority writes, and membership transitions separately.
+
+The API refreshes system health every ten seconds ahead of its unchanged
+15-second cache expiry. A slow refresh does not extend that freshness bound,
+and completed failed checks replace the cached result immediately. This reduces
+probe latency during ordinary namespace audits without accepting stale health.
