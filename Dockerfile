@@ -1,5 +1,6 @@
 # Use the publisher's immutable patch-release image and verify the installed
-# Buildah version after OS security updates. Verified September 25, 2026.
+# Buildah version after OS security updates. The October 18 Fedora update
+# advances Buildah to the reviewed 1.43.5 symlink-escape fixes.
 ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.4-immutable@sha256:6f237dd57d662fe3e86e6d5cae018585173913783d3a4480d729fc8b92247487
 
 FROM ${BUILDAH_IMAGE} AS node-tools
@@ -38,8 +39,8 @@ COPY --from=release-security /security/release-sbom.cdx.json /release-sbom.cdx.j
 
 FROM node-tools AS tools
 
-ARG GO_VERSION=1.26.6
-ARG GO_SHA256=708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89
+ARG GO_VERSION=1.26.9
+ARG GO_SHA256=42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d
 RUN curl --fail --location --proto '=https' --tlsv1.2 \
       --output go.tar.gz \
       "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" && \
@@ -73,7 +74,7 @@ RUN cd kubectl && \
     go mod verify && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
       -trimpath -buildvcs=false \
-      -ldflags="-s -w -X k8s.io/component-base/version.gitMajor=1 -X k8s.io/component-base/version.gitMinor=34 -X k8s.io/component-base/version.gitVersion=${KUBECTL_VERSION}+cars.1 -X k8s.io/component-base/version.gitCommit=${KUBECTL_COMMIT} -X k8s.io/component-base/version.gitTreeState=clean" \
+      -ldflags="-s -w -X k8s.io/component-base/version.gitMajor=1 -X k8s.io/component-base/version.gitMinor=34 -X k8s.io/component-base/version.gitVersion=${KUBECTL_VERSION}+cars.2 -X k8s.io/component-base/version.gitCommit=${KUBECTL_COMMIT} -X k8s.io/component-base/version.gitTreeState=clean" \
       -o /usr/local/bin/kubectl . && \
     go clean -cache -modcache && \
     rm -rf /usr/local/go /tmp/cars-runtime-tools
@@ -115,7 +116,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
 COPY wait-for-services.sh /wait-for-services.sh
 
-RUN install -d -m 0755 /app/src/migrations && \
+RUN set -eux; install -d -m 0755 /app/src/migrations && \
     for file in /app/dist/src/migrations/*.js; do \
       install -m 0644 "$file" "/app/src/migrations/$(basename "${file%.js}").ts"; \
     done && \
@@ -125,9 +126,10 @@ RUN install -d -m 0755 /app/src/migrations && \
     test ! -e /usr/local/bin/npm && \
     test ! -d /usr/local/lib/node_modules/npm && \
     test "$(node --version)" = "v24.19.0" && \
-    test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11+cars.1" && \
-    test "$(helm version --template '{{.Version}}')" = "v4.2.4+cars-patched-go1.26.6" && \
-    buildah --version | grep -F 'buildah version 1.43.4'
+    test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11+cars.2" && \
+    test "$(helm version --template '{{.Version}}')" = "v4.2.4+cars-patched-go1.26.9" && \
+    test "$(buildah --version)" = 'buildah version 1.43.5 (image-spec 1.1.1, runtime-spec 1.2.1)' && \
+    test "$(rpm -q --qf '%{VERSION}-%{RELEASE}' buildah)" = '1.43.5-1.fc44'
 
 ENV CARS_MIGRATIONS_DIR=/app/src/migrations
 

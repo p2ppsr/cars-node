@@ -304,3 +304,66 @@ Integrate `cars build` and `cars release now` into CI pipelines. After pushing c
 ## License
 
 CARS Node is licensed under the open BSV license. See [LICENSE.txt](./LICENSE.txt) for more details.
+
+### Advertisement controller maintenance
+
+The controller stops admitting loop work on SIGTERM/SIGINT, finishes its active
+reconciliation or GASP operation, then releases leadership and closes HTTP/SQL
+resources. Its five-minute idle wait is interruptible. Health context exposes
+`maintenance.active`, `stopping`, `lastCompletedAt`, `nextRunAt`, and `nextGaspAt`
+so operators can distinguish a follower or newly started process from a busy
+controller without waiting for a six-hour GASP cycle. Preserve enough Pod
+termination grace for active work; the controller does not force-cancel it.
+
+Cached leadership is revalidated on the original SQL connection before each
+iteration. A lost session clears leadership and returns an invalidated pool
+resource for disposal. MySQL named locks remain server-local: both controllers
+must share one lock authority during a database-writer transition. This change
+does not turn named locks into a cross-server distributed lease.
+
+
+### Database and API maintenance
+
+Set `CARS_ADVISORY_MYSQL_HOST` identically on every API and advertisement
+controller to keep cron, deletion, and advertisement locks on one explicit
+MySQL server while ordinary data connections move between proxies. It inherits
+the SQL credentials, database, port, and connection options. The authority must
+stay healthy throughout the wave; changing it requires a separate quiescent
+handoff and is not automatic database failover.
+
+`CARS_BACKGROUND_PAUSED_UNTIL` accepts an ISO UTC deadline no more than four
+hours ahead. It stops new cron, deletion-reconciler, and advertisement work;
+accepted work finishes. A deletion requested during the pause retains durable
+intent and returns HTTP 202 with `CARS_PROJECT_DELETE_PENDING`, not a claim of
+completion. Expiry is reported in health context but keeps the fence closed:
+an expired migration must never activate competing lock authorities. Operators
+must restore a valid maintenance state or remove the pause after verified handoff.
+During a lock-authority
+migration, first drain the old workers and introduce paused replacements, prove
+no old worker/lock remains, then unpause replicas on the common authority.
+
+The API stops HTTP and timer admission on SIGTERM, awaits active requests,
+cron/deletion work, and upload processing that continues after its HTTP 202,
+then closes SQL pools. Kubernetes deployments must run the build controller as
+a restartable init sidecar (`restartPolicy: Always`) so it remains available
+until the API has finished, with enough Pod grace for admitted work. Maintenance
+still checks for idle long builds/uploads before disruption; a one-hour grace
+does not authorize interrupting a longer deployment. The build controller also
+finishes accepted HTTP work on SIGTERM. Endpoint withdrawal and propagation
+must precede process shutdown.
+
+Shared Mongo readiness accepts either two Ready data replicas plus the legacy
+arbiter or at least three Ready data replicas without an arbiter. Operators must
+verify actual replication, majority writes, and membership transitions separately.
+
+The API refreshes system health every ten seconds ahead of its unchanged
+15-second cache expiry. A slow refresh does not extend that freshness bound,
+and completed failed checks replace the cached result immediately. This reduces
+probe latency during ordinary namespace audits without accepting stale health.
+
+The October 18 maintenance image rebuilds the embedded Helm 4.2.4 and kubectl
+1.34.11 tools with Go 1.26.9 and `golang.org/x/net` 0.60.0 (which requires
+`x/text` 0.42.0). The Go archive SHA-256 is pinned to the publisher's download
+manifest. These address the runtime scan findings without exempting the image
+from its HIGH/CRITICAL gate. See the [Go security report](https://pkg.go.dev/vuln/GO-2026-6611)
+and [Go release history](https://go.dev/doc/devel/release#go1.26.9).

@@ -2,6 +2,8 @@ import type { Knex } from 'knex';
 import logger from './logger';
 import { assertProjectId, deleteProjectNamespace } from './namespace-lifecycle';
 import { sendAdminNotificationEmail } from './utils/email';
+import { backgroundWorkPaused } from './background-maintenance';
+import { DrainingTask } from './maintenance-worker';
 
 // Only an explicitly authorized, recent deletion may explain resources being
 // absent during teardown. A stalled deletion still fails the drift gate.
@@ -38,11 +40,13 @@ export async function completeProjectDeletion(
   projectId: string,
   removeNamespace = deleteProjectNamespace,
   notify = sendAdminNotificationEmail,
+  lockDb: Knex = db,
 ): Promise<boolean> {
   assertProjectId(projectId);
+  if (backgroundWorkPaused()) return false;
   // Keep the advisory lock on one dedicated connection across the external
   // operation. A process loss releases it; durable intent survives the loss.
-  return db.transaction(async lock => {
+  return lockDb.transaction(async lock => {
     const lockName = `cars.delete.${projectId}`;
     const [rows] = await lock.raw('SELECT GET_LOCK(?, 0) AS acquired', [lockName]);
     if (Number(rows?.[0]?.acquired) !== 1) return false;
@@ -78,30 +82,30 @@ export async function completeProjectDeletion(
   });
 }
 
-export async function reconcileProjectDeletions(db: Knex): Promise<void> {
+export async function reconcileProjectDeletions(db: Knex, lockDb: Knex = db): Promise<void> {
+  if (backgroundWorkPaused()) return;
   const projects = await db('projects').whereNotNull('deletion_requested_at')
     .orderBy('deletion_attempted_at', 'asc').orderBy('deletion_requested_at', 'asc')
     .limit(5).select('project_uuid');
   for (const project of projects) {
     try {
-      await completeProjectDeletion(db, project.project_uuid);
+      await completeProjectDeletion(db, project.project_uuid, undefined, undefined, lockDb);
     } catch (error: any) {
       logger.error({ projectId: project.project_uuid, error: error.message, alert: 'cars.project_delete.reconciliation_failed' }, 'Durable project deletion will be reconciled again');
     }
   }
 }
 
-export function startProjectDeletionReconciler(db: Knex): NodeJS.Timeout {
-  let running = false;
+export function startProjectDeletionReconciler(db: Knex, lockDb: Knex = db) {
+  const task = new DrainingTask();
   const tick = async () => {
-    if (running) return;
-    running = true;
-    try { await reconcileProjectDeletions(db); }
-    catch (error: any) { logger.error({ error: error.message, alert: 'cars.project_delete.reconciler_failed' }, 'Project deletion reconciliation failed'); }
-    finally { running = false; }
+    await task.run(async () => {
+      try { await reconcileProjectDeletions(db, lockDb); }
+      catch (error: any) { logger.error({ error: error.message, alert: 'cars.project_delete.reconciler_failed' }, 'Project deletion reconciliation failed'); }
+    });
   };
   void tick();
   const timer = setInterval(() => void tick(), 10_000);
   timer.unref();
-  return timer;
+  return { get state() { return task.state; }, stop: async () => { clearInterval(timer); await task.stop(); } };
 }

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import 'express-async-errors';
+import { closeHttpServer } from './http-server';
 import express from 'express';
 import { rateLimit } from 'express-rate-limit';
 import logger from './logger';
@@ -468,7 +469,18 @@ async function main() {
     }
   });
 
-  app.listen(port, '0.0.0.0', () => logger.info({ port }, 'CARS namespace lifecycle controller listening'));
+  const server = app.listen(port, '0.0.0.0', () => logger.info({ port }, 'CARS namespace lifecycle controller listening'));
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    void closeHttpServer(server).catch(error => {
+      logger.error({ error, alert: 'cars.namespace_lifecycle.shutdown_failed' }, 'Namespace lifecycle shutdown failed');
+      process.exitCode = 1;
+    });
+  };
+  process.once('SIGTERM', stop);
+  process.once('SIGINT', stop);
 }
 
 if (require.main === module) {

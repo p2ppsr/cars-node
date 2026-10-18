@@ -580,14 +580,15 @@ export async function collectProjectHealth(projectId: string, options: {
                     }
                     const desiredMembers = sharedMongoStatefulSet.spec?.replicas || 0;
                     const readyMembers = sharedMongoStatefulSet.status?.readyReplicas || 0;
-                    const arbiterReady = (sharedMongoArbiter?.status?.readyReplicas || 0) >= 1;
+                    const { arbiterReady, arbiterRequired, ready } = mongoReplicaReadiness(sharedMongoStatefulSet, sharedMongoArbiter);
                     return {
-                        status: desiredMembers > 0 && readyMembers >= desiredMembers && arbiterReady ? 'ok' : 'error',
+                        status: ready ? 'ok' : 'error',
                         details: {
                             mode: projectDbMode,
                             namespace: sharedDbConfig.namespace,
                             desiredMembers,
                             readyMembers,
+                            arbiterRequired,
                             arbiterReady
                         }
                     };
@@ -671,5 +672,18 @@ export async function collectProjectHealth(projectId: string, options: {
         },
         checks,
         issues
+    };
+}
+
+/** Kubernetes readiness inventory; actual voting/data quorum is checked by operations. */
+export function mongoReplicaReadiness(statefulSet: any, arbiter: any) {
+    const desiredMembers = statefulSet?.spec?.replicas || 0;
+    const readyMembers = statefulSet?.status?.readyReplicas || 0;
+    const arbiterReady = (arbiter?.status?.readyReplicas || 0) >= 1;
+    const arbiterRequired = desiredMembers < 3;
+    return {
+        arbiterReady,
+        arbiterRequired,
+        ready: desiredMembers >= 2 && readyMembers >= desiredMembers && (!arbiterRequired || arbiterReady),
     };
 }
