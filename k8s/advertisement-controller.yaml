@@ -108,6 +108,10 @@ spec:
               port: http
             periodSeconds: 20
             timeoutSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
           resources:
             requests:
               cpu: 100m
