@@ -128,7 +128,7 @@ RUN set -eux; install -d -m 0755 /app/src/migrations && \
     test "$(node --version)" = "v24.19.0" && \
     test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11+cars.1" && \
     test "$(helm version --template '{{.Version}}')" = "v4.2.4+cars-patched-go1.26.6" && \
-    test "$(buildah --version)" = 'buildah version 1.43.5' && \
+    test "$(buildah --version)" = 'buildah version 1.43.5 (image-spec 1.1.1, runtime-spec 1.2.1)' && \
     test "$(rpm -q --qf '%{VERSION}-%{RELEASE}' buildah)" = '1.43.5-1.fc44'
 
 ENV CARS_MIGRATIONS_DIR=/app/src/migrations
