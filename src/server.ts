@@ -19,8 +19,11 @@ import { makeWallet } from './utils/wallet';
 import { collectSystemHealth } from './health';
 import { KnexSessionManager } from '@bsv/wallet-toolbox';
 import type { ProjectWallets } from './utils/wallet';
-import { disableRequestTimeout } from './http-server';
+import { disableRequestTimeout, closeHttpServer } from './http-server';
 import { KnexPaymentReplayStore } from './payment-replay';
+import { advisoryDb } from './advisory-db';
+import { backgroundWorkPaused } from './background-maintenance';
+import { ActiveOperations } from './maintenance-worker';
 
 function positiveInteger(name: string, fallback: number, maximum: number): number {
     const value = Number.parseInt(process.env[name] || String(fallback), 10);
@@ -52,11 +55,12 @@ function haltOnTimedout(req, res, next) {
     if (!req.timedout) next()
 }
 
-function publicHealth(report: any) {
+function publicHealth(report: any, maintenance?: any) {
     return {
         status: report.status,
         live: report.live,
         ready: report.ready,
+        maintenance,
         checks: (report.checks || []).map(check => ({
             name: check.name,
             status: check.status,
@@ -108,6 +112,8 @@ function topUpAmountFromRequest(req: any) {
 }
 
 async function main() {
+    backgroundWorkPaused();
+    let stopping = false;
     let migrationsComplete = false;
     let healthCache: { expiresAt: number; report: any } | undefined;
     let healthInFlight: Promise<any> | undefined;
@@ -131,8 +137,11 @@ async function main() {
     };
     const authSessionManager = new KnexSessionManager(db);
 
-    startCronJobs(db, projectWallets);
-    startProjectDeletionReconciler(db);
+    const cron = startCronJobs(db, projectWallets, advisoryDb);
+    const deletions = startProjectDeletionReconciler(db, advisoryDb);
+    const uploads = new ActiveOperations();
+    const maintenance = () => ({ version: 1, stopping, uploads: uploads.count,
+        cron: cron.state, deletions: deletions.state, paused: backgroundWorkPaused() });
 
     const app = express();
     app.disable('x-powered-by');
@@ -256,21 +265,22 @@ async function main() {
 
     app.get('/health/live', async (_req, res) => {
         const report = await getSystemHealth();
-        res.status(report.live ? 200 : 503).json(publicHealth(report));
+        res.status(report.live ? 200 : 503).json(publicHealth(report, maintenance()));
     });
 
     app.get('/health/ready', async (_req, res) => {
         const report = await getSystemHealth();
-        res.status(report.ready ? 200 : 503).json(publicHealth(report));
+        res.status(report.ready ? 200 : 503).json(publicHealth(report, maintenance()));
     });
 
     app.get('/health', async (_req, res) => {
         const report = await getSystemHealth();
-        res.status(report.ready ? 200 : 503).json(publicHealth(report));
+        res.status(report.ready ? 200 : 503).json(publicHealth(report, maintenance()));
     });
 
     // Upload uses signed URLs, so is excluded from Authrite. Also, they are not logged for performance reasons (they are large).
-    app.post('/api/v1/upload/:deploymentId/:signature', uploadLimiter, timeout(uploadTimeout), haltOnTimedout, upload);
+    app.post('/api/v1/upload/:deploymentId/:signature', uploadLimiter, timeout(uploadTimeout), haltOnTimedout,
+        async (req, res) => { await uploads.run(() => upload(req, res)); });
 
     // Public queries are also not authenticated
     app.get('/api/v1/public', publicRoute)
@@ -410,6 +420,24 @@ async function main() {
         logger.info(`CARS Node listening on port ${port}`);
     });
     disableRequestTimeout(server);
+    const stop = async (signal: string) => {
+        if (stopping) return;
+        stopping = true;
+        logger.info({ signal, uploads: uploads.count }, 'Finishing accepted CARS work before shutdown');
+        // Endpoint withdrawal/preStop precedes SIGTERM. Stop HTTP admission and
+        // timer admission, then await handlers that continue beyond HTTP 202.
+        await Promise.all([closeHttpServer(server), cron.stop(), deletions.stop()]);
+        await uploads.drain();
+        if (advisoryDb !== db) await advisoryDb.destroy();
+        await db.destroy();
+        logger.info('CARS shutdown completed');
+    };
+    const onSignal = (signal: string) => void stop(signal).catch(error => {
+        logger.error({ error, alert: 'cars.shutdown.failed' }, 'CARS shutdown failed; retaining the process for inspection');
+        process.exitCode = 1;
+    });
+    process.once('SIGTERM', () => onSignal('SIGTERM'));
+    process.once('SIGINT', () => onSignal('SIGINT'));
 }
 
 main().catch(err => {

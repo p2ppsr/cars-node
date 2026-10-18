@@ -4,36 +4,43 @@ import logger from './logger';
 import type { Knex } from 'knex';
 import { billProjects } from './utils/billing';
 import type { ProjectWallets } from './utils/wallet';
+import { backgroundWorkPaused } from './background-maintenance';
+import { DrainingTask } from './maintenance-worker';
 
-export function startCronJobs(db: Knex, wallets: ProjectWallets) {
+export function startCronJobs(db: Knex, wallets: ProjectWallets, lockDb: Knex = db) {
+    const task = new DrainingTask();
     // Check project keys every 5 minutes
-    new CronJob(
+    const job = new CronJob(
         '*/5 * * * *',
         async () => {
-            try {
-                await runSingletonCron(db, async () => {
-                    logger.info('Running singleton CARS cron jobs');
-                    await reconcileStaleDeployments(db);
-                    try {
-                        await checkAndFundProjectKeys(db, wallets);
-                    } catch (error) {
-                        logger.error({ error, alert: 'cars.cron.project_keys.failed' }, 'Error in project keys cron job');
-                    }
-                    try {
-                        await billProjects();
-                    } catch (error) {
-                        logger.error({ error, alert: 'cars.cron.billing.failed' }, 'Error in project billing cron job');
-                    }
-                });
-            } catch (error) {
-                logger.error({ error, alert: 'cars.cron.singleton.failed' }, 'CARS singleton cron execution failed');
-            }
+            if (backgroundWorkPaused()) return;
+            await task.run(async () => {
+                try {
+                    await runSingletonCron(lockDb, async () => {
+                        logger.info('Running singleton CARS cron jobs');
+                        await reconcileStaleDeployments(db);
+                        try {
+                            await checkAndFundProjectKeys(db, wallets);
+                        } catch (error) {
+                            logger.error({ error, alert: 'cars.cron.project_keys.failed' }, 'Error in project keys cron job');
+                        }
+                        try {
+                            await billProjects();
+                        } catch (error) {
+                            logger.error({ error, alert: 'cars.cron.billing.failed' }, 'Error in project billing cron job');
+                        }
+                    });
+                } catch (error) {
+                    logger.error({ error, alert: 'cars.cron.singleton.failed' }, 'CARS singleton cron execution failed');
+                }
+            });
         },
         null,
         true
     );
 
     logger.info('Cron jobs started');
+    return { get state() { return task.state; }, stop: async () => { job.stop(); await task.stop(); } };
 }
 
 export async function reconcileStaleDeployments(db: Knex): Promise<void> {

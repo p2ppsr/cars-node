@@ -18,6 +18,7 @@ import {
 } from '../namespace-lifecycle';
 
 import { requestProjectDeletion, completeProjectDeletion, ProjectDeletionConflict } from '../project-deletion';
+import { advisoryDb } from '../advisory-db';
 
 const router = Router();
 
@@ -681,9 +682,9 @@ router.post('/:projectId/delete', requireRegisteredUser, requireProject, require
         throw error;
     }
     try {
-        const completed = await completeProjectDeletion(db, project.project_uuid);
-        if (!completed) return res.status(503).json({
-            error: 'Project deletion is already in progress; retry to confirm completion',
+        const completed = await completeProjectDeletion(db, project.project_uuid, undefined, undefined, advisoryDb);
+        if (!completed) return res.status(202).json({
+            message: 'Project deletion is recorded and pending; retry to confirm completion',
             code: 'CARS_PROJECT_DELETE_PENDING',
         });
     } catch (error: any) {

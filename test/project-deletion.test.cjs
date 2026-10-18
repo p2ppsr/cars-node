@@ -122,3 +122,27 @@ test('active uploads block deletion before intent or namespace changes', async (
   assert.equal(state.project.deletion_requested_at, null)
   assert.deepEqual(state.deleted, [])
 })
+
+
+test('maintenance defers deletion without losing durable authorization or touching resources', async t => {
+  const previous = process.env.CARS_BACKGROUND_PAUSED_UNTIL
+  process.env.CARS_BACKGROUND_PAUSED_UNTIL = new Date(Date.now() + 60_000).toISOString()
+  t.after(() => previous === undefined ? delete process.env.CARS_BACKGROUND_PAUSED_UNTIL : process.env.CARS_BACKGROUND_PAUSED_UNTIL = previous)
+  const { db, state } = fakeDb()
+  assert.equal(await completeProjectDeletion(db, projectId, async () => assert.fail('paused deletion')), false)
+  assert.ok(state.project.deletion_requested_at)
+  assert.deepEqual(state.deleted, [])
+  assert.equal(state.releases, 0)
+})
+
+test('deletion uses the explicit lock authority while data stays on the application database', async () => {
+  const { db, state } = fakeDb()
+  const queries = []
+  const lockDb = { transaction: async callback => callback({ raw: async sql => {
+    queries.push(sql); return [[{ acquired: 1 }]]
+  } }) }
+  await completeProjectDeletion(db, projectId, async () => {}, async () => {}, lockDb)
+  assert.equal(state.project, null)
+  assert.equal(state.releases, 0)
+  assert.equal(queries.length, 2)
+})

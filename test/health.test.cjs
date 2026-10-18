@@ -164,3 +164,24 @@ test('namespace drift blocks readiness without turning liveness into a restart l
   assert.equal(report.live, true)
   assert.equal(report.ready, false)
 })
+
+const { mongoReplicaReadiness } = require('../dist/src/health.js')
+
+test('shared Mongo retains the arbiter requirement for a two-data-member layout', () => {
+  const pair = { spec: { replicas: 2 }, status: { readyReplicas: 2 } }
+  assert.equal(mongoReplicaReadiness(pair, undefined).ready, false)
+  assert.equal(mongoReplicaReadiness(pair, { status: { readyReplicas: 1 } }).ready, true)
+})
+
+test('three Ready Mongo data members do not require a retired arbiter', () => {
+  const trio = { spec: { replicas: 3 }, status: { readyReplicas: 3 } }
+  assert.deepEqual(mongoReplicaReadiness(trio, { spec: { replicas: 0 }, status: {} }),
+    { ready: true, arbiterReady: false, arbiterRequired: false })
+})
+
+test('a missing Mongo data member is not masked by a Ready arbiter', () => {
+  assert.equal(mongoReplicaReadiness({ spec: { replicas: 3 }, status: { readyReplicas: 2 } },
+    { status: { readyReplicas: 1 } }).ready, false)
+  assert.equal(mongoReplicaReadiness({ spec: { replicas: 1 }, status: { readyReplicas: 1 } },
+    { status: { readyReplicas: 1 } }).ready, false)
+})

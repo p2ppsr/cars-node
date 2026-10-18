@@ -320,3 +320,35 @@ iteration. A lost session clears leadership and returns an invalidated pool
 resource for disposal. MySQL named locks remain server-local: both controllers
 must share one lock authority during a database-writer transition. This change
 does not turn named locks into a cross-server distributed lease.
+
+
+### Database and API maintenance
+
+Set `CARS_ADVISORY_MYSQL_HOST` identically on every API and advertisement
+controller to keep cron, deletion, and advertisement locks on one explicit
+MySQL server while ordinary data connections move between proxies. It inherits
+the SQL credentials, database, port, and connection options. The authority must
+stay healthy throughout the wave; changing it requires a separate quiescent
+handoff and is not automatic database failover.
+
+`CARS_BACKGROUND_PAUSED_UNTIL` accepts an ISO UTC deadline no more than four
+hours ahead. It stops new cron, deletion-reconciler, and advertisement work;
+accepted work finishes. A deletion requested during the pause retains durable
+intent and returns HTTP 202 with `CARS_PROJECT_DELETE_PENDING`, not a claim of
+completion. It resumes automatically after the deadline. During a lock-authority
+migration, first drain the old workers and introduce paused replacements, prove
+no old worker/lock remains, then unpause replicas on the common authority.
+
+The API stops HTTP and timer admission on SIGTERM, awaits active requests,
+cron/deletion work, and upload processing that continues after its HTTP 202,
+then closes SQL pools. Kubernetes deployments must run the build controller as
+a restartable init sidecar (`restartPolicy: Always`) so it remains available
+until the API has finished, with enough Pod grace for admitted work. Maintenance
+still checks for idle long builds/uploads before disruption; a one-hour grace
+does not authorize interrupting a longer deployment. The build controller also
+finishes accepted HTTP work on SIGTERM. Endpoint withdrawal and propagation
+must precede process shutdown.
+
+Shared Mongo readiness accepts either two Ready data replicas plus the legacy
+arbiter or at least three Ready data replicas without an arbiter. Operators must
+verify actual replication, majority writes, and membership transitions separately.

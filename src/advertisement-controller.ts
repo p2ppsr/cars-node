@@ -8,6 +8,8 @@ import { installDiscoveryDenylist } from './discovery-denylist';
 
 import { MySqlLeaderLease } from './advertisements/leader';
 import { MaintenanceWorker } from './maintenance-worker';
+import { advisoryDb } from './advisory-db';
+import { backgroundWorkPaused } from './background-maintenance';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -16,6 +18,7 @@ function required(name: string): string {
 }
 
 async function main() {
+  backgroundWorkPaused(); // Reject malformed maintenance configuration before starting work.
   const privateKey = required('CARS_ADVERTISEMENT_PRIVATE_KEY');
   if (!/^[0-9a-f]{64}$/.test(privateKey)) {
     throw new Error('CARS_ADVERTISEMENT_PRIVATE_KEY must be 64 lowercase hexadecimal characters');
@@ -71,7 +74,7 @@ async function main() {
 
   const reconciler = new AdvertisementReconciler(db, server.engine, privateKey, network);
   installDiscoveryDenylist(undefined, reconciler.identityKey);
-  const leader = new MySqlLeaderLease(db, `cars-advertisement-controller:${network}`);
+  const leader = new MySqlLeaderLease(advisoryDb, `cars-advertisement-controller:${network}`);
   let lastReconcile: ReconcileReport | undefined;
   let lastGaspAt: string | undefined;
   let lastGaspError: string | undefined;
@@ -79,6 +82,7 @@ async function main() {
   let nextGaspAt = Date.now() + gaspIntervalMs;
   const worker = new MaintenanceWorker(async () => {
     try {
+      if (backgroundWorkPaused()) { await leader.release(); return; }
       if (await leader.acquire()) {
         // stop() may arrive while the asynchronous lock check is in flight.
         if (worker.state.stopping) return;
@@ -111,7 +115,7 @@ async function main() {
       lastReconcile,
       lastGaspAt,
       lastGaspError,
-      maintenance: { ...worker.state, nextGaspAt: new Date(nextGaspAt).toISOString() },
+      maintenance: { ...worker.state, paused: backgroundWorkPaused(), nextGaspAt: new Date(nextGaspAt).toISOString() },
     }),
   });
 
@@ -128,6 +132,7 @@ async function main() {
     await worker.stop();
     await leader.release().catch(error => logger.error({ error }, 'Failed to release controller leader lock'));
     await server.close();
+    if (advisoryDb !== db) await advisoryDb.destroy();
     await db.destroy();
   };
   process.once('SIGTERM', () => void stop('SIGTERM'));
