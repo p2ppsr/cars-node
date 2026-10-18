@@ -304,3 +304,19 @@ Integrate `cars build` and `cars release now` into CI pipelines. After pushing c
 ## License
 
 CARS Node is licensed under the open BSV license. See [LICENSE.txt](./LICENSE.txt) for more details.
+
+### Advertisement controller maintenance
+
+The controller stops admitting loop work on SIGTERM/SIGINT, finishes its active
+reconciliation or GASP operation, then releases leadership and closes HTTP/SQL
+resources. Its five-minute idle wait is interruptible. Health context exposes
+`maintenance.active`, `stopping`, `lastCompletedAt`, `nextRunAt`, and `nextGaspAt`
+so operators can distinguish a follower or newly started process from a busy
+controller without waiting for a six-hour GASP cycle. Preserve enough Pod
+termination grace for active work; the controller does not force-cancel it.
+
+Cached leadership is revalidated on the original SQL connection before each
+iteration. A lost session clears leadership and returns an invalidated pool
+resource for disposal. MySQL named locks remain server-local: both controllers
+must share one lock authority during a database-writer transition. This change
+does not turn named locks into a cross-server distributed lease.

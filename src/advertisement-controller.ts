@@ -1,5 +1,4 @@
 import OverlayExpress from '@bsv/overlay-express';
-import type { Knex } from 'knex';
 import db from './db';
 import logger from './logger';
 import { normalizeProjectNetwork, projectNetworkToOverlayNetwork, type ProjectNetwork } from './network';
@@ -7,47 +6,8 @@ import { PassiveAdvertiser } from './advertisements/passive-advertiser';
 import { AdvertisementReconciler, type ReconcileReport } from './advertisements/reconciler';
 import { installDiscoveryDenylist } from './discovery-denylist';
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-class MySqlLeaderLease {
-  private connection: any;
-  isLeader = false;
-
-  constructor(private readonly knex: Knex, private readonly lockName: string) {}
-
-  async acquire(): Promise<boolean> {
-    if (this.connection) return this.isLeader;
-    const connection = await this.knex.client.acquireConnection();
-    const queryConnection = typeof connection.promise === 'function' ? connection.promise() : connection;
-    try {
-      const [rows] = await queryConnection.query('SELECT GET_LOCK(?, 0) AS acquired', [this.lockName]);
-      this.isLeader = Number(rows?.[0]?.acquired) === 1;
-      if (!this.isLeader) {
-        await this.knex.client.releaseConnection(connection);
-        return false;
-      }
-      this.connection = connection;
-      return true;
-    } catch (error) {
-      await this.knex.client.releaseConnection(connection);
-      throw error;
-    }
-  }
-
-  async release(): Promise<void> {
-    if (!this.connection) return;
-    try {
-      const queryConnection = typeof this.connection.promise === 'function'
-        ? this.connection.promise()
-        : this.connection;
-      await queryConnection.query('SELECT RELEASE_LOCK(?)', [this.lockName]);
-    } finally {
-      await this.knex.client.releaseConnection(this.connection);
-      this.connection = undefined;
-      this.isLeader = false;
-    }
-  }
-}
+import { MySqlLeaderLease } from './advertisements/leader';
+import { MaintenanceWorker } from './maintenance-worker';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -116,49 +76,16 @@ async function main() {
   let lastGaspAt: string | undefined;
   let lastGaspError: string | undefined;
 
-  server.configureHealth({
-    contextProvider: async () => ({
-      serviceType: 'cars-advertisement-controller',
-      network,
-      identityKey: reconciler.identityKey,
-      reconciliationEnabled,
-      leader: leader.isLeader,
-      lastReconcile,
-      lastGaspAt,
-      lastGaspError,
-    }),
-  });
-
-  // configureEngine needed GASP enabled to build the sync configuration. Avoid
-  // blocking listen on a full discovery sync; the elected replica owns it.
-  server.enableGASPSync = false;
-  await server.start();
-
-  let stopping = false;
-  const stop = async (signal: string) => {
-    if (stopping) return;
-    stopping = true;
-    logger.info({ signal }, 'Stopping CARS advertisement controller');
-    await leader.release().catch(error => logger.error({ error }, 'Failed to release controller leader lock'));
-    await server.close();
-    await db.destroy();
-  };
-  process.once('SIGTERM', () => void stop('SIGTERM'));
-  process.once('SIGINT', () => void stop('SIGINT'));
-
-  // The shared Mongo discovery state is already warm. Delay the first SQL/BEEF
-  // hydration pass until the regular maintenance window instead of imposing a
-  // full-network GASP import on every rollout.
   let nextGaspAt = Date.now() + gaspIntervalMs;
-  while (!stopping) {
+  const worker = new MaintenanceWorker(async () => {
     try {
       if (await leader.acquire()) {
-        if (reconciliationEnabled) {
-          lastReconcile = await reconciler.reconcile();
-        }
-        if (Date.now() >= nextGaspAt) {
+        // stop() may arrive while the asynchronous lock check is in flight.
+        if (worker.state.stopping) return;
+        if (reconciliationEnabled) lastReconcile = await reconciler.reconcile();
+        if (!worker.state.stopping && Date.now() >= nextGaspAt) {
           try {
-            await server.engine.startGASPSync();
+            await server.engine!.startGASPSync();
             lastGaspAt = new Date().toISOString();
             lastGaspError = undefined;
           } catch (error: any) {
@@ -172,8 +99,44 @@ async function main() {
       logger.error({ error }, 'Advertisement controller loop failed');
       await leader.release().catch(() => undefined);
     }
-    await sleep(reconcileIntervalMs);
-  }
+  }, reconcileIntervalMs);
+
+  server.configureHealth({
+    contextProvider: async () => ({
+      serviceType: 'cars-advertisement-controller',
+      network,
+      identityKey: reconciler.identityKey,
+      reconciliationEnabled,
+      leader: leader.isLeader,
+      lastReconcile,
+      lastGaspAt,
+      lastGaspError,
+      maintenance: { ...worker.state, nextGaspAt: new Date(nextGaspAt).toISOString() },
+    }),
+  });
+
+  // configureEngine needed GASP enabled to build the sync configuration. Avoid
+  // blocking listen on a full discovery sync; the elected replica owns it.
+  server.enableGASPSync = false;
+  await server.start();
+
+  let stopping = false;
+  const stop = async (signal: string) => {
+    if (stopping) return;
+    stopping = true;
+    logger.info({ signal }, 'Stopping CARS advertisement controller');
+    await worker.stop();
+    await leader.release().catch(error => logger.error({ error }, 'Failed to release controller leader lock'));
+    await server.close();
+    await db.destroy();
+  };
+  process.once('SIGTERM', () => void stop('SIGTERM'));
+  process.once('SIGINT', () => void stop('SIGINT'));
+
+  // The shared discovery state is warm. The interruptible worker preserves
+  // the six-hour GASP cadence and finishes in-flight work before releasing its
+  // leadership or closing database/HTTP resources during shutdown.
+  await worker.run();
 }
 
 main().catch(error => {
