@@ -45,3 +45,15 @@ test('shutdown awaits the in-flight health check before database disposal', asyn
   await tick();assert.equal(drained,false)
   update.resolve('done');await drain
 })
+
+test('early refresh covers a bounded API retry without extending freshness or hiding its result', async () => {
+  let now=0,next=Promise.resolve({ready:true})
+  const cache=new HealthCache(()=>next,15000,()=>now)
+  await cache.get()
+  now=5000
+  const update=deferred();next=update.promise
+  const refreshing=cache.refresh()
+  for (now=5000;now<=13000;now+=250) assert.equal((await cache.get()).ready,true)
+  update.resolve({ready:false});await refreshing
+  assert.equal((await cache.get()).ready,false)
+})
