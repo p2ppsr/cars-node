@@ -228,7 +228,7 @@ test('control-plane image and deploy path pin and verify the production supply c
   assert.match(dockerfile, /ENV CARS_MIGRATIONS_DIR=\/app\/src\/migrations/)
   assert.match(dockerfile, /\/app\/src\/migrations\/\$\(basename "\$\{file%\.js\}"\)\.ts/)
   assert.match(dockerfile, /AS build[\s\S]+dnf install -y gcc-c\+\+ make[\s\S]+COPY --from=tools \/usr\/local\/ \/usr\/local\//)
-  assert.match(dockerfile, /AS runtime[\s\S]+dnf install -y bash ca-certificates openssl shadow-utils[\s\S]+ARG APP_COMMIT/)
+  assert.match(dockerfile, /AS runtime[\s\S]+ARG BUILDAH_RPM_VERSION=1\.43\.5-1\.fc44[\s\S]+dnf install -y "buildah-\$\{BUILDAH_RPM_VERSION\}" bash ca-certificates openssl shadow-utils[\s\S]+ARG APP_COMMIT/)
   assert.doesNotMatch(dockerfile, /setup_lts|get-helm-3|VERIFY_CHECKSUM=false|:latest/)
 
   assert.doesNotMatch(workflow, /\n  push:/)
