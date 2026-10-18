@@ -13,7 +13,11 @@ export function advisoryConnection(connection: any, host: string) {
     return value.toString();
   }
   if (!connection || typeof connection !== 'object') throw new Error('Unsupported SQL connection configuration');
-  return { ...connection, host };
+  // Knex hides credentials as non-enumerable properties on its parsed config.
+  // Preserve their descriptors when changing only the advisory authority.
+  const descriptors = Object.getOwnPropertyDescriptors(connection);
+  delete descriptors.host;
+  return Object.defineProperties({ host }, descriptors);
 }
 
 // Named MySQL locks are local to one mysqld, even in Galera. Operators can

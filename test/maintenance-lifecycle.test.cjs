@@ -89,3 +89,23 @@ test('advisory authority preserves database credentials and options without logg
   assert.throws(() => advisoryConnection(uri, 'bad/host'), /^Error: Invalid CARS_ADVISORY_MYSQL_HOST$/)
   assert.throws(() => advisoryConnection('secret-invalid-url', 'database-2'), error => !error.message.includes('secret-invalid-url'))
 })
+
+
+test('advisory authority retains the password hidden by the real Knex client', async () => {
+  const knex = require('knex')
+  const primary = knex({ client: 'mysql2', connection: 'mysql://fixture:only-test@proxy:3306/cars' })
+  let authority
+  try {
+    assert.equal(Object.keys(primary.client.config.connection).includes('password'), false)
+    const changed = advisoryConnection(primary.client.config.connection, 'database-2')
+    assert.equal(changed.password, 'only-test')
+    assert.equal(JSON.stringify(changed).includes('only-test'), false)
+    authority = knex({ client: 'mysql2', connection: changed })
+    assert.equal(authority.client.connectionSettings.host, 'database-2')
+    assert.equal(authority.client.connectionSettings.password, 'only-test')
+    assert.equal(primary.client.connectionSettings.host, 'proxy')
+  } finally {
+    await primary.destroy()
+    if (authority) await authority.destroy()
+  }
+})
