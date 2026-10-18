@@ -1,5 +1,6 @@
 # Use the publisher's immutable patch-release image and verify the installed
-# Buildah version after OS security updates. Verified September 25, 2026.
+# Buildah version after OS security updates. The October 18 Fedora update
+# advances Buildah to the reviewed 1.43.5 symlink-escape fixes.
 ARG BUILDAH_IMAGE=quay.io/buildah/stable:v1.43.4-immutable@sha256:6f237dd57d662fe3e86e6d5cae018585173913783d3a4480d729fc8b92247487
 
 FROM ${BUILDAH_IMAGE} AS node-tools
@@ -115,7 +116,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
 COPY wait-for-services.sh /wait-for-services.sh
 
-RUN install -d -m 0755 /app/src/migrations && \
+RUN set -eux; install -d -m 0755 /app/src/migrations && \
     for file in /app/dist/src/migrations/*.js; do \
       install -m 0644 "$file" "/app/src/migrations/$(basename "${file%.js}").ts"; \
     done && \
@@ -127,7 +128,8 @@ RUN install -d -m 0755 /app/src/migrations && \
     test "$(node --version)" = "v24.19.0" && \
     test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11+cars.1" && \
     test "$(helm version --template '{{.Version}}')" = "v4.2.4+cars-patched-go1.26.6" && \
-    buildah --version | grep -F 'buildah version 1.43.4'
+    test "$(buildah --version)" = 'buildah version 1.43.5' && \
+    test "$(rpm -q --qf '%{VERSION}-%{RELEASE}' buildah)" = '1.43.5-1.fc44'
 
 ENV CARS_MIGRATIONS_DIR=/app/src/migrations
 
