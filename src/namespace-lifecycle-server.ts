@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import 'express-async-errors';
 import { closeHttpServer } from './http-server';
+import { runKubectlRead } from './kubectl-read';
 import express from 'express';
 import { rateLimit } from 'express-rate-limit';
 import logger from './logger';
@@ -59,7 +60,12 @@ function runKubectl(args: string[], input?: object, timeoutMs = 120000): Promise
     const stderr: Buffer[] = [];
     let outputBytes = 0;
     let settled = false;
-    const timeout = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
+    let killTimeout: NodeJS.Timeout | undefined;
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      killTimeout = setTimeout(() => child.kill('SIGKILL'), 250);
+      killTimeout.unref();
+    }, timeoutMs);
     const collect = (target: Buffer[], chunk: Buffer) => {
       const value = Buffer.from(chunk);
       outputBytes += value.length;
@@ -76,6 +82,7 @@ function runKubectl(args: string[], input?: object, timeoutMs = 120000): Promise
     child.once('error', reject);
     child.once('exit', (code, signal) => {
       clearTimeout(timeout);
+      clearTimeout(killTimeout);
       if (settled) return;
       settled = true;
       if (code === 0) {
@@ -108,7 +115,7 @@ const readinessAuthorizationChecks = [
 type AuthorizationCheck = (check: string[]) => Promise<string>;
 
 async function runAuthorizationCheck(check: string[]): Promise<string> {
-  return runKubectl(['auth', 'can-i', ...check], undefined, 10000);
+  return runKubectlRead(['auth', 'can-i', ...check], runKubectl);
 }
 
 export async function verifyNamespaceLifecyclePermissions(
@@ -338,9 +345,11 @@ async function remove(projectId: string): Promise<void> {
 }
 
 async function audit(projectIds: string[], deletingProjectIds: string[] = []) {
-  const namespaceList = JSON.parse(await runKubectl(['get', 'namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
-  const bindingList = JSON.parse(await runKubectl(['get', 'rolebindings', '--all-namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
-  const policyList = JSON.parse(await runKubectl(['get', 'networkpolicies', '--all-namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json']));
+  const [namespaceList, bindingList, policyList] = await Promise.all([
+    ['get', 'namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json'],
+    ['get', 'rolebindings', '--all-namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json'],
+    ['get', 'networkpolicies', '--all-namespaces', '-l', 'cars.bsv.io/managed=true', '-o', 'json'],
+  ].map(async args => JSON.parse(await runKubectlRead(args, runKubectl))));
   return namespaceInventoryReport(projectIds, deletingProjectIds, namespaceList, bindingList, policyList);
 }
 
