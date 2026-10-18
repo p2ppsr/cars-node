@@ -4,7 +4,7 @@ const http = require('node:http')
 const { setImmediate: tick } = require('node:timers/promises')
 const { DrainingTask, ActiveOperations } = require('../dist/src/maintenance-worker.js')
 const { closeHttpServer } = require('../dist/src/http-server.js')
-const { backgroundWorkPaused } = require('../dist/src/background-maintenance.js')
+const { backgroundWorkPaused, backgroundMaintenance } = require('../dist/src/background-maintenance.js')
 const { advisoryConnection } = require('../dist/src/advisory-db.js')
 
 function deferred() {
@@ -65,11 +65,12 @@ test('HTTP close preserves an accepted request and upload drain awaits work afte
   assert.equal(operations.count, 0)
 })
 
-test('bounded background pause expires and rejects malformed or excessive deadlines', () => {
+test('background fence reports expiry without activating a competing authority', () => {
   const now = Date.parse('2026-10-18T03:00:00Z')
   assert.equal(backgroundWorkPaused('', now), false)
   assert.equal(backgroundWorkPaused('2026-10-18T03:01:00Z', now), true)
-  assert.equal(backgroundWorkPaused('2026-10-18T02:59:00Z', now), false)
+  assert.equal(backgroundWorkPaused('2026-10-18T02:59:00Z', now), true)
+  assert.equal(backgroundMaintenance('2026-10-18T02:59:00Z', now).expired, true)
   for (const value of ['invalid', '2026-10-18T03:01:00+00:00', '2026-10-18T07:00:01Z']) {
     assert.throws(() => backgroundWorkPaused(value, now), /UTC deadline/)
   }

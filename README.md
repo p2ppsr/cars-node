@@ -335,7 +335,10 @@ handoff and is not automatic database failover.
 hours ahead. It stops new cron, deletion-reconciler, and advertisement work;
 accepted work finishes. A deletion requested during the pause retains durable
 intent and returns HTTP 202 with `CARS_PROJECT_DELETE_PENDING`, not a claim of
-completion. It resumes automatically after the deadline. During a lock-authority
+completion. Expiry is reported in health context but keeps the fence closed:
+an expired migration must never activate competing lock authorities. Operators
+must restore a valid maintenance state or remove the pause after verified handoff.
+During a lock-authority
 migration, first drain the old workers and introduce paused replacements, prove
 no old worker/lock remains, then unpause replicas on the common authority.
 

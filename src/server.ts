@@ -22,7 +22,7 @@ import type { ProjectWallets } from './utils/wallet';
 import { disableRequestTimeout, closeHttpServer } from './http-server';
 import { KnexPaymentReplayStore } from './payment-replay';
 import { advisoryDb } from './advisory-db';
-import { backgroundWorkPaused } from './background-maintenance';
+import { backgroundWorkPaused, backgroundMaintenance } from './background-maintenance';
 import { ActiveOperations } from './maintenance-worker';
 
 function positiveInteger(name: string, fallback: number, maximum: number): number {
@@ -141,7 +141,7 @@ async function main() {
     const deletions = startProjectDeletionReconciler(db, advisoryDb);
     const uploads = new ActiveOperations();
     const maintenance = () => ({ version: 1, stopping, uploads: uploads.count,
-        cron: cron.state, deletions: deletions.state, paused: backgroundWorkPaused() });
+        cron: cron.state, deletions: deletions.state, ...backgroundMaintenance() });
 
     const app = express();
     app.disable('x-powered-by');

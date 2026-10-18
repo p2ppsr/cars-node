@@ -9,7 +9,7 @@ import { installDiscoveryDenylist } from './discovery-denylist';
 import { MySqlLeaderLease } from './advertisements/leader';
 import { MaintenanceWorker } from './maintenance-worker';
 import { advisoryDb } from './advisory-db';
-import { backgroundWorkPaused } from './background-maintenance';
+import { backgroundWorkPaused, backgroundMaintenance } from './background-maintenance';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -115,7 +115,7 @@ async function main() {
       lastReconcile,
       lastGaspAt,
       lastGaspError,
-      maintenance: { ...worker.state, paused: backgroundWorkPaused(), nextGaspAt: new Date(nextGaspAt).toISOString() },
+      maintenance: { ...worker.state, ...backgroundMaintenance(), nextGaspAt: new Date(nextGaspAt).toISOString() },
     }),
   });
 
