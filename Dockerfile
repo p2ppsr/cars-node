@@ -101,8 +101,12 @@ RUN npm run build && \
 
 FROM ${BUILDAH_IMAGE} AS runtime
 
+# Include the security package in the cache key so an older cached dnf upgrade
+# cannot supply the runtime package. Verify it before copying application code.
+ARG BUILDAH_RPM_VERSION=1.43.5-1.fc44
 RUN dnf upgrade -y --refresh && \
-    dnf install -y bash ca-certificates openssl shadow-utils && \
+    dnf install -y "buildah-${BUILDAH_RPM_VERSION}" bash ca-certificates openssl shadow-utils && \
+    test "$(rpm -q --qf '%{VERSION}-%{RELEASE}' buildah)" = "${BUILDAH_RPM_VERSION}" && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
