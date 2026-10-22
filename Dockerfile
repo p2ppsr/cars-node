@@ -12,8 +12,8 @@ RUN dnf upgrade -y --refresh && \
 
 WORKDIR /tmp/toolchain
 
-ARG NODE_VERSION=24.19.0
-ARG NODE_SHA256=14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647
+ARG NODE_VERSION=24.22.1
+ARG NODE_SHA256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
 RUN curl --fail --location --proto '=https' --tlsv1.2 \
       --output node.tar.xz \
       "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" && \
@@ -39,8 +39,8 @@ COPY --from=release-security /security/release-sbom.cdx.json /release-sbom.cdx.j
 
 FROM node-tools AS tools
 
-ARG GO_VERSION=1.26.9
-ARG GO_SHA256=42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d
+ARG GO_VERSION=1.26.10
+ARG GO_SHA256=ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5
 RUN curl --fail --location --proto '=https' --tlsv1.2 \
       --output go.tar.gz \
       "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" && \
@@ -129,9 +129,9 @@ RUN set -eux; install -d -m 0755 /app/src/migrations && \
     chmod 0755 /wait-for-services.sh && \
     test ! -e /usr/local/bin/npm && \
     test ! -d /usr/local/lib/node_modules/npm && \
-    test "$(node --version)" = "v24.19.0" && \
+    test "$(node --version)" = "v24.22.1" && \
     test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11+cars.2" && \
-    test "$(helm version --template '{{.Version}}')" = "v4.2.4+cars-patched-go1.26.9" && \
+    test "$(helm version --template '{{.Version}}')" = "v4.2.4+cars-patched-go1.26.10" && \
     test "$(buildah --version)" = 'buildah version 1.43.5 (image-spec 1.1.1, runtime-spec 1.2.1)' && \
     test "$(rpm -q --qf '%{VERSION}-%{RELEASE}' buildah)" = '1.43.5-1.fc44'
 
