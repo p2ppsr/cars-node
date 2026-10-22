@@ -39,8 +39,8 @@ COPY --from=release-security /security/release-sbom.cdx.json /release-sbom.cdx.j
 
 FROM node-tools AS tools
 
-ARG GO_VERSION=1.26.9
-ARG GO_SHA256=42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d
+ARG GO_VERSION=1.26.10
+ARG GO_SHA256=ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5
 RUN curl --fail --location --proto '=https' --tlsv1.2 \
       --output go.tar.gz \
       "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" && \
@@ -131,7 +131,7 @@ RUN set -eux; install -d -m 0755 /app/src/migrations && \
     test ! -d /usr/local/lib/node_modules/npm && \
     test "$(node --version)" = "v24.22.1" && \
     test "$(kubectl version --client=true --output=json | node -pe 'JSON.parse(require("fs").readFileSync(0)).clientVersion.gitVersion')" = "v1.34.11+cars.2" && \
-    test "$(helm version --template '{{.Version}}')" = "v4.2.4+cars-patched-go1.26.9" && \
+    test "$(helm version --template '{{.Version}}')" = "v4.2.4+cars-patched-go1.26.10" && \
     test "$(buildah --version)" = 'buildah version 1.43.5 (image-spec 1.1.1, runtime-spec 1.2.1)' && \
     test "$(rpm -q --qf '%{VERSION}-%{RELEASE}' buildah)" = '1.43.5-1.fc44'
 
