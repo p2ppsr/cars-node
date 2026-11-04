@@ -1,12 +1,12 @@
 import { WalletInterface, PrivateKey, P2PKH, PublicKey, InternalizeActionArgs, CachedKeyDeriver } from '@bsv/sdk';
 import type { Knex } from 'knex';
+import { walletServiceOptions } from './wallet-services';
 import logger from '../logger';
 import crypto from 'crypto';
 import { Services, StorageClient, Wallet, WalletSigner, WalletStorageManager } from '@bsv/wallet-toolbox-client';
 import {
     ProjectNetwork,
     WalletChain,
-    arcadeUrlForNetwork,
     projectNetworkToWalletChain,
     storageUrlForChain
 } from '../network';
@@ -17,15 +17,7 @@ export async function makeWallet(chain: WalletChain, privateKey: string): Promis
     const keyDeriver = new CachedKeyDeriver(new PrivateKey(privateKey, 'hex'));
     const storageManager = new WalletStorageManager(keyDeriver.identityKey);
     const signer = new WalletSigner(chain, keyDeriver, storageManager);
-    const serviceOptions = Services.createDefaultOptions(chain);
-    if (chain === 'ttn') {
-        serviceOptions.arcadeUrl = arcadeUrlForNetwork('teratestnet');
-        serviceOptions.arcadeConfig = {
-            ...serviceOptions.arcadeConfig,
-            apiKey: process.env.TTN_ARCADE_API_KEY || serviceOptions.arcadeConfig?.apiKey,
-            deploymentId: process.env.TTN_ARCADE_DEPLOYMENT_ID || serviceOptions.arcadeConfig?.deploymentId
-        };
-    }
+    const serviceOptions = walletServiceOptions(chain);
     const services = new Services(serviceOptions);
     const wallet = new Wallet(signer, services);
     const client = new StorageClient(

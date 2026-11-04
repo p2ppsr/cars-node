@@ -367,3 +367,12 @@ The October 18 maintenance image rebuilds the embedded Helm 4.2.4 and kubectl
 manifest. These address the runtime scan findings without exempting the image
 from its HIGH/CRITICAL gate. See the [Go security report](https://pkg.go.dev/vuln/GO-2026-6611)
 and [Go release history](https://go.dev/doc/devel/release#go1.26.9).
+
+### Mainnet header provider
+
+`CARS_MAINNET_CHAINTRACKS_URL` selects an operator-qualified HTTPS Go Chaintracks
+v2 endpoint for mainnet wallet header and Merkle-root checks. Without it, the
+installed Wallet Toolbox default applies. The endpoint must not contain credentials,
+a query or a fragment. Normal proof verification remains enabled. Testnet and Terra
+Testnet keep their existing provider and broadcaster configuration. Qualify the
+provider's network, current height and known block roots before activating it.
