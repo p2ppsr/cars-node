@@ -6,6 +6,7 @@ export interface NamespaceAudit {
   status: 'ok' | 'error';
   expectedProjects: number;
   managedNamespaces: number;
+  creatingNamespaces?: string[];
   missingNamespaces: string[];
   orphanNamespaces: string[];
   invalidNamespaces: string[];
