@@ -58,15 +58,17 @@ function namespaceName(projectId: string): string {
   return `${namespacePrefix}${projectId}`;
 }
 
-function runKubectl(args: string[], input?: object, timeoutMs = 120000): Promise<string> {
+export function runKubectl(args: string[], input?: object, timeoutMs = 120000): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn('kubectl', args, { stdio: ['pipe', 'pipe', 'pipe'] });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let outputBytes = 0;
     let settled = false;
+    let timedOut = false;
     let killTimeout: NodeJS.Timeout | undefined;
     const timeout = setTimeout(() => {
+      timedOut = true;
       child.kill('SIGTERM');
       killTimeout = setTimeout(() => child.kill('SIGKILL'), 250);
       killTimeout.unref();
@@ -84,17 +86,28 @@ function runKubectl(args: string[], input?: object, timeoutMs = 120000): Promise
     };
     child.stdout.on('data', chunk => collect(stdout, chunk));
     child.stderr.on('data', chunk => collect(stderr, chunk));
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
+    child.once('error', error => {
+      clearTimeout(timeout);
+      clearTimeout(killTimeout);
+      settled = true;
+      reject(error);
+    });
+    // The exit event can precede the final stdout/stderr data. Namespace
+    // inventories must be complete before JSON.parse sees them.
+    child.once('close', (code, signal) => {
       clearTimeout(timeout);
       clearTimeout(killTimeout);
       if (settled) return;
       settled = true;
-      if (code === 0) {
+      if (code === 0 && !timedOut) {
         resolve(Buffer.concat(stdout).toString('utf8'));
         return;
       }
       const detail = Buffer.concat(stderr).toString('utf8').trim();
+      if (timedOut) {
+        reject(new Error(`kubectl ${args[0]} timed out after ${timeoutMs}ms: ${detail.slice(0, 800)}`));
+        return;
+      }
       reject(new Error(`kubectl ${args[0]} failed (${signal ? `signal ${signal}` : `exit ${code}`}): ${detail.slice(0, 800)}`));
     });
     if (input) child.stdin.end(JSON.stringify(input));

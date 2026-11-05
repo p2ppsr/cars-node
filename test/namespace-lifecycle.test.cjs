@@ -80,3 +80,67 @@ test('lifecycle permission readiness is bounded and concurrent', async () => {
     /ServiceAccount cannot delete namespaces/,
   )
 })
+
+
+test('kubectl JSON waits for stdout and stderr to close after process exit', async t => {
+  const { EventEmitter } = require('node:events')
+  const { PassThrough } = require('node:stream')
+  const cp = require('node:child_process')
+  const child = new EventEmitter()
+  child.stdin = new PassThrough()
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
+  child.kill = () => true
+  t.mock.method(cp, 'spawn', () => child)
+  const { runKubectl } = require('../dist/src/namespace-lifecycle-server.js')
+  let finished = false
+  const output = runKubectl(['get', 'namespaces', '-o', 'json'], undefined, 1000)
+    .then(value => { finished = true; return value })
+  child.stdout.write('{"items":[')
+  child.emit('exit', 0, null)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(finished, false, 'process exit must not publish an incomplete JSON document')
+  child.stdout.end('{"metadata":{"name":"owned"}}]}')
+  child.stderr.end()
+  child.emit('close', 0, null)
+  assert.deepEqual(JSON.parse(await output), { items: [{ metadata: { name: 'owned' } }] })
+})
+
+
+test('kubectl failure includes trailing stderr after process exit', async t => {
+  const { EventEmitter } = require('node:events')
+  const { PassThrough } = require('node:stream')
+  const child = new EventEmitter()
+  for (const stream of ['stdin', 'stdout', 'stderr']) child[stream] = new PassThrough()
+  child.kill = () => true
+  t.mock.method(require('node:child_process'), 'spawn', () => child)
+  const { runKubectl } = require('../dist/src/namespace-lifecycle-server.js')
+  const output = runKubectl(['get', 'namespaces'], undefined, 1000)
+  child.emit('exit', 1, null)
+  child.stderr.end('last diagnostic')
+  child.stdout.end()
+  child.emit('close', 1, null)
+  await assert.rejects(output, /exit 1.*last diagnostic/)
+})
+
+test('kubectl timeout remains a failure when SIGTERM exits zero', async t => {
+  const { EventEmitter } = require('node:events')
+  const { PassThrough } = require('node:stream')
+  const child = new EventEmitter()
+  for (const stream of ['stdin', 'stdout', 'stderr']) child[stream] = new PassThrough()
+  const signals = []
+  child.kill = signal => {
+    signals.push(signal)
+    queueMicrotask(() => {
+      child.stdout.end('{}')
+      child.stderr.end()
+      child.emit('exit', 0, null)
+      child.emit('close', 0, null)
+    })
+    return true
+  }
+  t.mock.method(require('node:child_process'), 'spawn', () => child)
+  const { runKubectl } = require('../dist/src/namespace-lifecycle-server.js')
+  await assert.rejects(runKubectl(['get', 'namespaces'], undefined, 5), /timed out after 5ms/)
+  assert.deepEqual(signals, ['SIGTERM'])
+})
