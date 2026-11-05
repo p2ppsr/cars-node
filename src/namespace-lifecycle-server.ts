@@ -14,6 +14,11 @@ const roleName = process.env.CARS_PROJECT_RUNTIME_ROLE || 'cars-project-runtime'
 const bindingName = process.env.CARS_PROJECT_RUNTIME_BINDING || 'cars-project-runtime';
 const networkPolicyName = 'cars-tenant-baseline';
 const namespacePrefix = 'cars-project-';
+// Namespace provisioning precedes SQL commit. This explicit creation intent is
+// bounded by the API server's immutable creationTimestamp, so retries/restarts
+// cannot extend it or hide an abandoned namespace indefinitely.
+const creationIntentAnnotation = 'cars.bsv.io/creation-intent';
+export const NAMESPACE_CREATION_TRANSITION_MS = 120_000;
 const requiredNamespaceLabels = {
   'app.kubernetes.io/managed-by': 'cars-namespace-lifecycle',
   'cars.bsv.io/managed': 'true',
@@ -152,6 +157,7 @@ function namespaceDocument(projectId: string) {
     kind: 'Namespace',
     metadata: {
       name: namespaceName(projectId),
+      annotations: { [creationIntentAnnotation]: 'v1' },
       labels: {
         ...requiredNamespaceLabels,
         'cars.bsv.io/project-id': projectId,
@@ -353,7 +359,7 @@ async function audit(projectIds: string[], deletingProjectIds: string[] = []) {
   return namespaceInventoryReport(projectIds, deletingProjectIds, namespaceList, bindingList, policyList);
 }
 
-export function namespaceInventoryReport(projectIds: string[], deletingProjectIds: string[], namespaceList: any, bindingList: any, policyList: any) {
+export function namespaceInventoryReport(projectIds: string[], deletingProjectIds: string[], namespaceList: any, bindingList: any, policyList: any, nowMs = Date.now()) {
   const expected = new Set(projectIds.map(projectId => {
     assertProjectId(projectId);
     return namespaceName(projectId);
@@ -376,25 +382,37 @@ export function namespaceInventoryReport(projectIds: string[], deletingProjectId
     if (policy?.metadata?.name === networkPolicyName) policyByNamespace.set(policy.metadata.namespace, policy);
   }
   const missingNamespaces = [...expected].filter(name => !managed.has(name) && !deleting.has(name)).sort();
-  const orphanNamespaces = [...managed].filter(name => !expected.has(name)).sort();
+  const creatingNamespaces = [...managed].filter(name => {
+    if (expected.has(name) || !/^cars-project-[a-f0-9]{32}$/.test(name)) return false;
+    const namespace = namespaceByName.get(name);
+    if (namespace?.metadata?.annotations?.[creationIntentAnnotation] !== 'v1' ||
+      !namespaceIsValid(namespace, name.slice(namespacePrefix.length))) return false;
+    const createdAt = Date.parse(namespace.metadata.creationTimestamp);
+    return Number.isFinite(createdAt) && createdAt <= nowMs &&
+      nowMs - createdAt < NAMESPACE_CREATION_TRANSITION_MS;
+  }).sort();
+  const creating = new Set(creatingNamespaces);
+  const orphanNamespaces = [...managed].filter(name => !expected.has(name) && !creating.has(name)).sort();
   const invalidNamespaces = [...expected]
     .filter(name => managed.has(name))
     .filter(name => !namespaceIsValid(namespaceByName.get(name), name.slice(namespacePrefix.length)))
     .sort();
-  const invalidBindings = [...expected]
+  const validating = new Set([...expected, ...creating]);
+  const invalidBindings = [...validating]
     .filter(name => managed.has(name))
-    .filter(name => !deleting.has(name) || bindingByNamespace.has(name))
+    .filter(name => (!deleting.has(name) && !creating.has(name)) || bindingByNamespace.has(name))
     .filter(name => !bindingIsValid(bindingByNamespace.get(name), name.slice(namespacePrefix.length)))
     .sort();
-  const invalidNetworkPolicies = [...expected]
+  const invalidNetworkPolicies = [...validating]
     .filter(name => managed.has(name))
-    .filter(name => !deleting.has(name) || policyByNamespace.has(name))
+    .filter(name => (!deleting.has(name) && !creating.has(name)) || policyByNamespace.has(name))
     .filter(name => !networkPolicyIsValid(policyByNamespace.get(name), name.slice(namespacePrefix.length)))
     .sort();
   return {
     status: missingNamespaces.length || orphanNamespaces.length || invalidNamespaces.length || invalidBindings.length || invalidNetworkPolicies.length ? 'error' : 'ok',
     expectedProjects: expected.size,
     managedNamespaces: managed.size,
+    creatingNamespaces,
     missingNamespaces,
     orphanNamespaces,
     invalidNamespaces,
