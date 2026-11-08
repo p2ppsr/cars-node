@@ -1,0 +1,112 @@
+name: Build Production Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact approved master SHA for the bounded read-only timeout repair
+        required: true
+        type: string
+
+concurrency:
+  group: cars-node-production-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+      - name: Verify approved master source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch --no-tags origin master
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/master
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.22.1
+      - name: Compile, test, audit and generate SBOM
+        run: |
+          npm ci
+          npm run build
+          node --test test/kubectl-read.test.cjs test/namespace-lifecycle.test.cjs
+          python3 -m unittest discover -s test -p 'test_source_patch_image.py'
+          npm audit --omit=dev --audit-level=high
+          npm sbom --package-lock-only --omit=dev --sbom-format=cyclonedx > release-sbom.cdx.json
+          jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' release-sbom.cdx.json >/dev/null
+      - name: Build patched tools on hosted Linux amd64
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 --output go.tar.gz https://go.dev/dl/go1.26.10.linux-amd64.tar.gz
+          echo 'ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5  go.tar.gz' | sha256sum --check --strict
+          mkdir toolchain rebuilt-tools
+          tar -xzf go.tar.gz -C toolchain
+          export PATH="$PWD/toolchain/go/bin:$PATH" GOTOOLCHAIN=local
+          export GOPROXY=https://proxy.golang.org,direct GOSUMDB=sum.golang.org
+          tool_output="$PWD/rebuilt-tools"
+          (cd tools/helm && go mod download && go mod verify && test "$(go list -m golang.org/x/net)" = 'golang.org/x/net v0.62.0' && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags='-s -w -X helm.sh/helm/v4/internal/version.version=v4.2.4 -X helm.sh/helm/v4/internal/version.metadata=cars-patched-go1.26.10 -X helm.sh/helm/v4/internal/version.gitCommit=3900f434fd3ef2b84065dc04508df48f288dba00 -X helm.sh/helm/v4/internal/version.gitTreeState=clean' -o "$tool_output/helm" .)
+          (cd tools/kubectl && go mod download && go mod verify && test "$(go list -m golang.org/x/net)" = 'golang.org/x/net v0.62.0' && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags='-s -w -X k8s.io/component-base/version.gitMajor=1 -X k8s.io/component-base/version.gitMinor=34 -X k8s.io/component-base/version.gitVersion=v1.34.11+cars.2 -X k8s.io/component-base/version.gitCommit=3a634765b787dd069f7f714fa77d767cb7d43795 -X k8s.io/component-base/version.gitTreeState=clean' -o "$tool_output/kubectl" .)
+          rebuilt-tools/helm version --template '{{.Version}}' | grep -Fx 'v4.2.4+cars-patched-go1.26.10'
+          rebuilt-tools/kubectl version --client=true --output=json | jq -e '.clientVersion.gitVersion == "v1.34.11+cars.2"'
+          go version -m rebuilt-tools/helm > rebuilt-tools-provenance.txt
+          go version -m rebuilt-tools/kubectl >> rebuilt-tools-provenance.txt
+      - name: Fetch exact immutable base and assemble bounded source patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          mkdir base-input
+          gh release download "$(jq -r .archive_release .github/cars-source-patch-base.json)" \
+            --pattern "$(jq -r .archive_asset .github/cars-source-patch-base.json)" --dir base-input
+          python3 scripts/k8s/assemble-source-patch.py \
+            --base-archive "base-input/$(jq -r .archive_asset .github/cars-source-patch-base.json)" \
+            --dist dist --tools rebuilt-tools --output source-patch-oci --source-sha "$SOURCE_SHA"
+      - name: Load the complete image for unchanged vulnerability gates
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+          skopeo copy oci:source-patch-oci docker-daemon:cars-source-patch:${{ inputs.source_sha }}
+      - name: Reject high or critical runtime vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: cars-source-patch:${{ inputs.source_sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+      - name: Package only new immutable registry content
+        run: |
+          python3 - <<'PYTHON'
+          import hashlib,json,pathlib,tarfile
+          layout=pathlib.Path('source-patch-oci')
+          index=json.loads((layout/'index.json').read_text());descriptor=index['manifests'][0]
+          manifest_path='blobs/sha256/'+descriptor['digest'][7:]
+          manifest=json.loads((layout/manifest_path).read_text())
+          names=['oci-layout','index.json',manifest_path,'blobs/sha256/'+manifest['config']['digest'][7:],'blobs/sha256/'+manifest['layers'][-1]['digest'][7:]]
+          with tarfile.open('cars-source-patch-content.tar','w') as archive:
+              for name in names:archive.add(layout/name,arcname=name,recursive=False)
+          result=json.loads(pathlib.Path('release-manifest.json').read_text())
+          result.update(content_bundle_format='cars-incremental-oci-content-v1',content_bundle='cars-source-patch-content.tar',content_bundle_sha256=hashlib.sha256(pathlib.Path('cars-source-patch-content.tar').read_bytes()).hexdigest(),content_bundle_bytes=pathlib.Path('cars-source-patch-content.tar').stat().st_size,base_blobs_excluded_from_bundle=True,published_to_registry=False)
+          pathlib.Path('release-manifest.json').write_text(json.dumps(result,indent=2)+'\n')
+          PYTHON
+          echo 'Scanned immutable image content is ready. Evans registry promotion and deployment remain owned by network-ops.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cars-production-release-${{ inputs.source_sha }}
+          path: |
+            release-manifest.json
+            release-sbom.cdx.json
+            cars-source-patch-content.tar
+            rebuilt-tools-provenance.txt
+          if-no-files-found: error
+          retention-days: 30

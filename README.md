@@ -361,12 +361,12 @@ The API refreshes system health every ten seconds ahead of its unchanged
 and completed failed checks replace the cached result immediately. This reduces
 probe latency during ordinary namespace audits without accepting stale health.
 
-The October 18 maintenance image rebuilds the embedded Helm 4.2.4 and kubectl
-1.34.11 tools with Go 1.26.9 and `golang.org/x/net` 0.60.0 (which requires
-`x/text` 0.42.0). The Go archive SHA-256 is pinned to the publisher's download
+The maintained runtime image rebuilds the embedded Helm 4.2.4 and kubectl
+1.34.11 tools with Go 1.26.10 and `golang.org/x/net` 0.62.0 (which requires
+`x/text` 0.43.0). The Go archive SHA-256 is pinned to the publisher's download
 manifest. These address the runtime scan findings without exempting the image
 from its HIGH/CRITICAL gate. See the [Go security report](https://pkg.go.dev/vuln/GO-2026-6611)
-and [Go release history](https://go.dev/doc/devel/release#go1.26.9).
+and [Go release history](https://go.dev/doc/devel/release#go1.26.10).
 
 ### Mainnet header provider
 
@@ -376,3 +376,16 @@ installed Wallet Toolbox default applies. The endpoint must not contain credenti
 a query or a fragment. Normal proof verification remains enabled. Testnet and Terra
 Testnet keep their existing provider and broadcaster configuration. Qualify the
 provider's network, current height and known block roots before activating it.
+
+
+When the Evans build fleet is held, `build-production-source-patch.yml` is the
+bounded hosted repair path for the source changes declared in
+`.github/cars-source-patch-base.json`. It preserves every exact approved base
+blob, verifies all unchanged compiled files and rebuilds only the declared
+Helm/kubectl tools. The helper is limited to 64 KiB; the entire new layer is limited
+to 256 MiB expanded and 96 MiB compressed. The complete image must pass the existing
+high/critical vulnerability policy, dependency audit and SBOM checks. The workflow
+exports hash-bound incremental registry content as an artifact; it does not deploy
+or activate cluster builds. Network-ops owns registry promotion, exact cache
+qualification and the fenced release. Retire this exceptional path after a
+separately qualified full image supersedes it.

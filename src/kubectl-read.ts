@@ -7,7 +7,8 @@ type Execute = (args: string[], input: undefined, timeoutMs: number) => Promise<
 // Authorization, inventory drift and mutation outcomes remain immediately visible.
 export function transientReadFailure(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /connection (?:to the server .* was )?refused|connection reset by peer|unexpected EOF|TLS handshake timeout|i\/o timeout|net\/http: request canceled while waiting for connection|signal SIGTERM/i.test(message);
+  return /connection (?:to the server .* was )?refused|connection reset by peer|unexpected EOF|TLS handshake timeout|i\/o timeout|net\/http: request canceled while waiting for connection|signal SIGTERM/i.test(message) ||
+    /^kubectl (?:get|auth) timed out after \d+(?:\.\d+)?ms:/.test(message);
 }
 
 export async function runKubectlRead(
