@@ -136,11 +136,11 @@ test('runtime cluster tools are rebuilt from pinned modules with patched depende
   assert.match(dockerfile, /v4\.2\.4\+cars-patched-go1\.26\.10/);
   assert.doesNotMatch(dockerfile, /dl\.k8s\.io\/release|linux-amd64\/helm/);
   assert.match(helmModule, /helm\.sh\/helm\/v4 v4\.2\.4/);
-  assert.match(helmModule, /golang\.org\/x\/crypto v0\.57\.0/);
+  assert.match(helmModule, /golang\.org\/x\/crypto v0\.58\.0/);
   assert.match(helmModule, /oras\.land\/oras-go\/v2 v2\.6\.2/);
   assert.match(kubectlModule, /k8s\.io\/kubectl v0\.34\.11/);
   for (const module of [helmModule, kubectlModule]) {
-    assert.match(module, /golang\.org\/x\/net v0\.60\.0/);
-    assert.match(module, /golang\.org\/x\/text v0\.42\.0/);
+    assert.match(module, /golang\.org\/x\/net v0\.62\.0/);
+    assert.match(module, /golang\.org\/x\/text v0\.43\.0/);
   }
 });
