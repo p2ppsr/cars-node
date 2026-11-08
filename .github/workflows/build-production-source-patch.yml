@@ -12,8 +12,11 @@ concurrency:
   group: cars-node-production-image
   cancel-in-progress: false
 
+# GitHub exposes draft release assets only to identities with push access.
+# This manual, merged-source job uses the permission solely to read the sealed
+# hash-bound base input; it creates/edits no release or source reference.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
