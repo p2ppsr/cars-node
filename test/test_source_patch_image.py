@@ -20,7 +20,7 @@ class SourcePatchImageTests(unittest.TestCase):
         (self.dist/'src/unchanged.js').write_bytes(b'unchanged\n')
         raw=io.BytesIO()
         with tarfile.open(fileobj=raw,mode='w') as tar:
-            for name,data in [('app/dist/src/kubectl-read.js',b'old\n'),('app/dist/src/unchanged.js',b'unchanged\n')]:
+            for name,data in [('app/dist/src/kubectl-read.js',b'old\n'),('app/dist/src/unchanged.js',b'unchanged\n'),('usr/local/bin/helm',self.elf(b'old helm')),('usr/local/bin/kubectl',self.elf(b'old kubectl'))]:
                 info=tarfile.TarInfo(name);info.size=len(data);info.mode=0o644;info.uid=10001;info.gid=10001
                 tar.addfile(info,io.BytesIO(data))
         layer=gzip.compress(raw.getvalue(),mtime=0)
@@ -32,13 +32,23 @@ class SourcePatchImageTests(unittest.TestCase):
         self.archive=self.root/'base.tar';self.write_archive()
         self.policy={'archive_sha256':hashlib.sha256(self.archive.read_bytes()).hexdigest(),'manifest_digest':m.digest(manifest),'layers':1,'source_sha':'a'*40,'allowed_runtime_changes':['src/kubectl-read.js'],'maximum_patch_bytes':65536}
 
+    @staticmethod
+    def elf(payload):
+        return b'\x7fELF\x02\x01'+b'\0'*12+b'\x3e\x00'+b'\0'*44+payload
+
+    def tools(self):
+        target=self.root/'tools';target.mkdir()
+        for name in ['helm','kubectl']:(target/name).write_bytes(self.elf(('new '+name).encode()))
+        self.policy['required_rebuilt_tools']=['helm','kubectl']
+        return target
+
     def write_archive(self):
         with tarfile.open(self.archive,'w') as tar:
             for name,data in self.members.items():
                 info=tarfile.TarInfo(name);info.size=len(data);tar.addfile(info,io.BytesIO(data))
 
-    def run_patch(self,policy=None):
-        out=self.root/'out';result=m.assemble(self.archive,self.dist,out,policy or self.policy,'b'*40,1700000000)
+    def run_patch(self,policy=None,tools=None):
+        out=self.root/'out';result=m.assemble(self.archive,self.dist,out,policy or self.policy,'b'*40,1700000000,tools)
         descriptor=json.loads((out/'index.json').read_text())['manifests'][0]
         manifest=json.loads(m.blob(out,descriptor));config=json.loads(m.blob(out,manifest['config']))
         return out,result,manifest,config
@@ -56,6 +66,27 @@ class SourcePatchImageTests(unittest.TestCase):
             entry=tar.getmembers()[0];self.assertEqual((entry.mode,entry.uid,entry.gid),(0o644,10001,10001))
             self.assertEqual(tar.extractfile(entry).read(),(self.dist/'src/kubectl-read.js').read_bytes())
         self.assertEqual(result['layers'],2);self.assertLess(result['new_layer_expanded_bytes'],65536)
+
+    def test_rebuilt_tools_are_exact_amd64_overrides_with_base_blobs_preserved(self):
+        tools=self.tools();out,result,manifest,config=self.run_patch(tools=tools)
+        self.assertEqual(manifest['layers'][:-1],self.manifest['layers'])
+        self.assertEqual(set(result['rebuilt_tools']),{'helm','kubectl'})
+        raw=gzip.decompress(m.blob(out,manifest['layers'][-1]))
+        with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
+            self.assertEqual(tar.getnames(),['app/dist/src/kubectl-read.js','usr/local/bin/helm','usr/local/bin/kubectl'])
+            for name in ['helm','kubectl']:self.assertEqual(tar.extractfile('usr/local/bin/'+name).read(),(tools/name).read_bytes())
+
+    def test_missing_rebuilt_tool_rejected(self):
+        tools=self.tools();(tools/'helm').unlink()
+        with self.assertRaisesRegex(ValueError,'tool inventory'):self.run_patch(tools=tools)
+
+    def test_wrong_tool_architecture_rejected(self):
+        tools=self.tools();data=bytearray((tools/'kubectl').read_bytes());data[18:20]=b'\xb7\x00';(tools/'kubectl').write_bytes(data)
+        with self.assertRaisesRegex(ValueError,'Linux amd64 ELF'):self.run_patch(tools=tools)
+
+    def test_required_tools_cannot_be_omitted(self):
+        self.tools()
+        with self.assertRaisesRegex(ValueError,'tool inventory'):self.run_patch()
 
     def test_corrupt_archive_rejected(self):
         self.archive.write_bytes(self.archive.read_bytes()+b'corrupt')

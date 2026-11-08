@@ -44,6 +44,21 @@ jobs:
           npm audit --omit=dev --audit-level=high
           npm sbom --package-lock-only --omit=dev --sbom-format=cyclonedx > release-sbom.cdx.json
           jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' release-sbom.cdx.json >/dev/null
+      - name: Build patched tools on hosted Linux amd64
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 --output go.tar.gz https://go.dev/dl/go1.26.10.linux-amd64.tar.gz
+          echo 'ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5  go.tar.gz' | sha256sum --check --strict
+          mkdir toolchain rebuilt-tools
+          tar -xzf go.tar.gz -C toolchain
+          export PATH="$PWD/toolchain/go/bin:$PATH" GOTOOLCHAIN=local
+          export GOPROXY=https://proxy.golang.org,direct GOSUMDB=sum.golang.org
+          tool_output="$PWD/rebuilt-tools"
+          (cd tools/helm && go mod download && go mod verify && test "$(go list -m golang.org/x/net)" = 'golang.org/x/net v0.62.0' && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags='-s -w -X helm.sh/helm/v4/internal/version.version=v4.2.4 -X helm.sh/helm/v4/internal/version.metadata=cars-patched-go1.26.10 -X helm.sh/helm/v4/internal/version.gitCommit=3900f434fd3ef2b84065dc04508df48f288dba00 -X helm.sh/helm/v4/internal/version.gitTreeState=clean' -o "$tool_output/helm" .)
+          (cd tools/kubectl && go mod download && go mod verify && test "$(go list -m golang.org/x/net)" = 'golang.org/x/net v0.62.0' && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags='-s -w -X k8s.io/component-base/version.gitMajor=1 -X k8s.io/component-base/version.gitMinor=34 -X k8s.io/component-base/version.gitVersion=v1.34.11+cars.2 -X k8s.io/component-base/version.gitCommit=3a634765b787dd069f7f714fa77d767cb7d43795 -X k8s.io/component-base/version.gitTreeState=clean' -o "$tool_output/kubectl" .)
+          rebuilt-tools/helm version --template '{{.Version}}' | grep -Fx 'v4.2.4+cars-patched-go1.26.10'
+          rebuilt-tools/kubectl version --client=true --output=json | jq -e '.clientVersion.gitVersion == "v1.34.11+cars.2"'
+          go version -m rebuilt-tools/helm > rebuilt-tools-provenance.txt
+          go version -m rebuilt-tools/kubectl >> rebuilt-tools-provenance.txt
       - name: Fetch exact immutable base and assemble bounded source patch
         env:
           GH_TOKEN: ${{ github.token }}
@@ -54,7 +69,7 @@ jobs:
             --pattern "$(jq -r .archive_asset .github/cars-source-patch-base.json)" --dir base-input
           python3 scripts/k8s/assemble-source-patch.py \
             --base-archive "base-input/$(jq -r .archive_asset .github/cars-source-patch-base.json)" \
-            --dist dist --output source-patch-oci --source-sha "$SOURCE_SHA"
+            --dist dist --tools rebuilt-tools --output source-patch-oci --source-sha "$SOURCE_SHA"
       - name: Load the complete image for unchanged vulnerability gates
         run: |
           sudo apt-get update
@@ -87,5 +102,6 @@ jobs:
             release-manifest.json
             release-sbom.cdx.json
             pushed-digest.txt
+            rebuilt-tools-provenance.txt
           if-no-files-found: error
           retention-days: 30

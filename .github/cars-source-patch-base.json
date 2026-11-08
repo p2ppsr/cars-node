@@ -8,7 +8,7 @@
   "allowed_runtime_changes": [
     "src/kubectl-read.js"
   ],
-  "maximum_patch_bytes": 65536,
+  "maximum_patch_bytes": 268435456,
   "runtime_git_paths": [
     "src",
     "setup.ts",
@@ -20,7 +20,17 @@
     "tools"
   ],
   "allowed_git_changes": [
-    "src/kubectl-read.ts"
+    "src/kubectl-read.ts",
+    "tools/helm/go.mod",
+    "tools/helm/go.sum",
+    "tools/kubectl/go.mod",
+    "tools/kubectl/go.sum"
   ],
-  "purpose": "Bounded hosted repair of the owned read-only timeout defect. Retains the exact approved base and all runtime settings. Retire this patch mode after a separately qualified full image supersedes it."
+  "purpose": "Bounded hosted source repair. Preserve all approved base blobs and every unchanged compiled file; replace only the read helper and both source-built tools after the x/net security update. Fresh full-image scan required. Retire after a separately qualified full image supersedes it.",
+  "maximum_compiled_patch_bytes": 65536,
+  "maximum_compressed_patch_bytes": 100663296,
+  "required_rebuilt_tools": [
+    "helm",
+    "kubectl"
+  ]
 }
