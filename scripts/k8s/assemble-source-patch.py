@@ -179,7 +179,7 @@ def assemble(archive,dist,layout,policy,source_sha,epoch,tools=None):
     if output['layers'][:-1]!=manifest['layers'] or updated['rootfs']['diff_ids'][:-1]!=config['rootfs']['diff_ids']:
         raise ValueError('base layers were changed')
     return {'source_sha':source_sha,'image_tag':tag,'image_digest':descriptor['digest'],'image':reference+'@'+descriptor['digest'],
-        'transport_image':'docker.io/bsvb/cars-node:'+tag+'@'+descriptor['digest'],'base_source_sha':policy['source_sha'],
+        'base_source_sha':policy['source_sha'],
         'base_manifest_digest':policy['manifest_digest'],'compiled_runtime_changes':changed,'rebuilt_tools':{name:{'sha256':hashlib.sha256((tools/name).read_bytes()).hexdigest(),'bytes':(tools/name).stat().st_size}for name in rebuilt},'all_base_layer_blobs_preserved':True,
         'new_layer_compressed_bytes':len(packed),'new_layer_expanded_bytes':len(raw),
         'new_content_blob_bytes':len(packed)+output['config']['size'],'base_layers':len(manifest['layers']),

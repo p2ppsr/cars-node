@@ -84,24 +84,29 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
           severity: CRITICAL,HIGH
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-      - name: Publish exact immutable image without rewriting base blobs
+      - name: Package only new immutable registry content
         run: |
-          image_tag="$(jq -r .image_tag release-manifest.json)"
-          skopeo copy --preserve-digests --authfile "$HOME/.docker/config.json" \
-            --digestfile pushed-digest.txt oci:source-patch-oci "docker://bsvb/cars-node:${image_tag}"
-          test "$(cat pushed-digest.txt)" = "$(jq -r .image_digest release-manifest.json)"
-          echo 'Promotion to the Evans registry and deployment remain owned by network-ops.' >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PYTHON'
+          import hashlib,json,pathlib,tarfile
+          layout=pathlib.Path('source-patch-oci')
+          index=json.loads((layout/'index.json').read_text());descriptor=index['manifests'][0]
+          manifest_path='blobs/sha256/'+descriptor['digest'][7:]
+          manifest=json.loads((layout/manifest_path).read_text())
+          names=['oci-layout','index.json',manifest_path,'blobs/sha256/'+manifest['config']['digest'][7:],'blobs/sha256/'+manifest['layers'][-1]['digest'][7:]]
+          with tarfile.open('cars-source-patch-content.tar','w') as archive:
+              for name in names:archive.add(layout/name,arcname=name,recursive=False)
+          result=json.loads(pathlib.Path('release-manifest.json').read_text())
+          result.update(content_bundle_format='cars-incremental-oci-content-v1',content_bundle='cars-source-patch-content.tar',content_bundle_sha256=hashlib.sha256(pathlib.Path('cars-source-patch-content.tar').read_bytes()).hexdigest(),content_bundle_bytes=pathlib.Path('cars-source-patch-content.tar').stat().st_size,base_blobs_excluded_from_bundle=True,published_to_registry=False)
+          pathlib.Path('release-manifest.json').write_text(json.dumps(result,indent=2)+'\n')
+          PYTHON
+          echo 'Scanned immutable image content is ready. Evans registry promotion and deployment remain owned by network-ops.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: cars-production-release-${{ inputs.source_sha }}
           path: |
             release-manifest.json
             release-sbom.cdx.json
-            pushed-digest.txt
+            cars-source-patch-content.tar
             rebuilt-tools-provenance.txt
           if-no-files-found: error
           retention-days: 30
