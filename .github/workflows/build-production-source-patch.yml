@@ -1,0 +1,91 @@
+name: Build Production Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact approved master SHA for the bounded read-only timeout repair
+        required: true
+        type: string
+
+concurrency:
+  group: cars-node-production-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+      - name: Verify approved master source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch --no-tags origin master
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/master
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.22.1
+      - name: Compile, test, audit and generate SBOM
+        run: |
+          npm ci
+          npm run build
+          node --test test/kubectl-read.test.cjs test/namespace-lifecycle.test.cjs
+          python3 -m unittest discover -s test -p 'test_source_patch_image.py'
+          npm audit --omit=dev --audit-level=high
+          npm sbom --package-lock-only --omit=dev --sbom-format=cyclonedx > release-sbom.cdx.json
+          jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' release-sbom.cdx.json >/dev/null
+      - name: Fetch exact immutable base and assemble bounded source patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          mkdir base-input
+          gh release download "$(jq -r .archive_release .github/cars-source-patch-base.json)" \
+            --pattern "$(jq -r .archive_asset .github/cars-source-patch-base.json)" --dir base-input
+          python3 scripts/k8s/assemble-source-patch.py \
+            --base-archive "base-input/$(jq -r .archive_asset .github/cars-source-patch-base.json)" \
+            --dist dist --output source-patch-oci --source-sha "$SOURCE_SHA"
+      - name: Load the complete image for unchanged vulnerability gates
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+          skopeo copy oci:source-patch-oci docker-daemon:cars-source-patch:${{ inputs.source_sha }}
+      - name: Reject high or critical runtime vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: cars-source-patch:${{ inputs.source_sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Publish exact immutable image without rewriting base blobs
+        run: |
+          image_tag="$(jq -r .image_tag release-manifest.json)"
+          skopeo copy --preserve-digests --authfile "$HOME/.docker/config.json" \
+            --digestfile pushed-digest.txt oci:source-patch-oci "docker://bsvb/cars-node:${image_tag}"
+          test "$(cat pushed-digest.txt)" = "$(jq -r .image_digest release-manifest.json)"
+          echo 'Promotion to the Evans registry and deployment remain owned by network-ops.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: cars-production-release-${{ inputs.source_sha }}
+          path: |
+            release-manifest.json
+            release-sbom.cdx.json
+            pushed-digest.txt
+          if-no-files-found: error
+          retention-days: 30

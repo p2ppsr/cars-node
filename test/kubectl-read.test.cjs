@@ -23,6 +23,27 @@ test('read retry has one eight-second budget and retains its final failure', asy
   assert.equal(now, 8000); assert.equal(calls, 4)
 })
 
+test('the actual child timeout message uses the existing remaining read budget', async () => {
+  let calls = 0, now = 0
+  const actual = await runKubectlRead(['auth', 'can-i', 'list', 'namespaces'], async (_, input, timeout) => {
+    assert.equal(input, undefined); assert.ok(timeout > 0 && timeout <= 2000)
+    calls++
+    if (calls === 1) { now += timeout; throw new Error(`kubectl auth timed out after ${timeout}ms: `) }
+    return 'yes\n'
+  }, () => now, async ms => { now += ms })
+  assert.equal(actual, 'yes\n'); assert.equal(calls, 2); assert.equal(now, 2250)
+})
+
+test('repeated real child timeout messages cannot extend the eight-second deadline', async () => {
+  let calls = 0, now = 0, final
+  await assert.rejects(runKubectlRead(['get', 'namespaces'], async (_, input, timeout) => {
+    assert.equal(input, undefined); assert.ok(timeout > 0 && timeout <= 2000)
+    calls++; now += timeout
+    final = new Error(`kubectl get timed out after ${timeout}ms: `); throw final
+  }, () => now, async ms => { now += ms }), error => error === final)
+  assert.equal(now, 8000); assert.equal(calls, 4)
+})
+
 test('mutations and unbounded raw/watch commands never execute', async () => {
   for (const args of [['apply', '-f', '-'], ['delete', 'namespace', 'x'], ['patch', 'namespace', 'x'], ['get', '--raw=/readyz'], ['get', 'pods', '--watch']]) {
     await assert.rejects(runKubectlRead(args, async () => { assert.fail('unsafe execution') }), /read-only/)

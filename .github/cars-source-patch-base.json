@@ -1,0 +1,26 @@
+{
+  "source_sha": "fca9dc29f264a1de96ee3b2799ad4c2836e84055",
+  "manifest_digest": "sha256:bee39339786afeeb5918def84f42f47f8e24f221eb6659eeb22b916dc5f405f2",
+  "archive_sha256": "333e7b2fc4d8adbe5cd1e1729a17c4d50ea84f63f022d4cae6d85c23acc26805",
+  "archive_release": "cars-base-fca9dc29-20261108",
+  "archive_asset": "base-fca9dc29.oci.tar",
+  "layers": 19,
+  "allowed_runtime_changes": [
+    "src/kubectl-read.js"
+  ],
+  "maximum_patch_bytes": 65536,
+  "runtime_git_paths": [
+    "src",
+    "setup.ts",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "Dockerfile",
+    "wait-for-services.sh",
+    "tools"
+  ],
+  "allowed_git_changes": [
+    "src/kubectl-read.ts"
+  ],
+  "purpose": "Bounded hosted repair of the owned read-only timeout defect. Retains the exact approved base and all runtime settings. Retire this patch mode after a separately qualified full image supersedes it."
+}
