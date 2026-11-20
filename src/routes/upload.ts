@@ -370,7 +370,7 @@ export default async (req: Request, res: Response) => {
       // Dockerfile for serving static files
       fs.writeFileSync(
         path.join(frontendDir, 'Dockerfile'),
-        `FROM docker.io/nginxinc/nginx-unprivileged:alpine@sha256:d9083fe47768377ef55dedafd67d4da7c2f2bc2bece7554954f29359deb0dce9
+        `FROM docker.io/nginx/nginx-unprivileged:1.31.9-alpine@sha256:60214a103e6f38e953ff957f34b1f2e97a9db801ab2df3821da955d0fe6cadd6
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY . /usr/share/nginx/html
 EXPOSE ${frontendPort}`
