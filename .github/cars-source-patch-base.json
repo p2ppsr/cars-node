@@ -6,7 +6,8 @@
   "archive_asset": "base-fca9dc29.oci.tar",
   "layers": 19,
   "allowed_runtime_changes": [
-    "src/kubectl-read.js"
+    "src/kubectl-read.js",
+    "src/routes/upload.js"
   ],
   "maximum_patch_bytes": 268435456,
   "runtime_git_paths": [
@@ -24,10 +25,11 @@
     "tools/helm/go.mod",
     "tools/helm/go.sum",
     "tools/kubectl/go.mod",
-    "tools/kubectl/go.sum"
+    "tools/kubectl/go.sum",
+    "src/routes/upload.ts"
   ],
-  "purpose": "Bounded hosted source repair. Preserve all approved base blobs and every unchanged compiled file; replace only the read helper and both source-built tools after the x/net security update. Fresh full-image scan required. Retire after a separately qualified full image supersedes it.",
-  "maximum_compiled_patch_bytes": 65536,
+  "purpose": "Bounded hosted source repair. Preserve the approved sealed base and all unchanged compiled files. Rebuild the patched tools, retain the read helper fix and add the exact NGINX frontend base pin. Run a fresh complete image scan. Retire this path after a qualified full image supersedes it.",
+  "maximum_compiled_patch_bytes": 131072,
   "maximum_compressed_patch_bytes": 100663296,
   "required_rebuilt_tools": [
     "helm",

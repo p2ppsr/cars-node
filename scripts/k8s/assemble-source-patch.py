@@ -196,6 +196,14 @@ def main():
     subprocess.run(['git','merge-base','--is-ancestor',a.source_sha,'origin/master'],check=True)
     differences=subprocess.check_output(['git','diff','--name-only',policy['source_sha'],a.source_sha,'--',*policy['runtime_git_paths']],text=True).splitlines()
     if sorted(differences)!=sorted(policy['allowed_git_changes']):raise ValueError('unapproved runtime source changes')
+    if 'src/routes/upload.ts' in differences:
+        path = 'src/routes/upload.ts'
+        before = subprocess.check_output(['git', 'show', policy['source_sha'] + ':' + path], text=True)
+        after = Path(path).read_text()
+        old_pin = 'docker.io/nginxinc/nginx-unprivileged:alpine@sha256:d9083fe47768377ef55dedafd67d4da7c2f2bc2bece7554954f29359deb0dce9'
+        new_pin = 'docker.io/nginx/nginx-unprivileged:1.31.9-alpine@sha256:60214a103e6f38e953ff957f34b1f2e97a9db801ab2df3821da955d0fe6cadd6'
+        if before.count(old_pin) != 1 or after != before.replace(old_pin, new_pin):
+            raise ValueError('frontend generator must change only the approved NGINX base pin')
     epoch=int(subprocess.check_output(['git','show','-s','--format=%ct',a.source_sha],text=True))
     result=assemble(a.base_archive,a.dist,a.output,policy,a.source_sha,epoch,a.tools)
     Path('release-manifest.json').write_text(json.dumps(result,indent=2)+'\n')
