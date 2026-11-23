@@ -1,5 +1,24 @@
 # CARS Node — Cloud Automated Runtime System
 
+### Opt-in Node HTTP services
+
+An application can select a Node service instead of OverlayExpress by adding
+`"backend": { "runtime": "node", "entrypoint": "./src/server.mjs", "frontendProxy": ["/msc-signal/v1/", "/signal-bridge.json"] }`
+to its deployment metadata and selecting both frontend and backend deployment.
+The entrypoint must be an ESM file under `backend/src/`, honor `PORT` (8080), bind
+the pod interface, and handle SIGTERM. It runs as the unprivileged tenant user.
+Node services do not receive database or overlay administrator credentials and
+cannot declare topic managers, lookup services or contracts. Existing projects
+keep their OverlayExpress runtime unless they explicitly select `runtime`.
+
+The optional bounded literal proxy paths forward HTTP and WebSocket requests
+from the frontend to the backend in the same pod. They disable access logging,
+buffering and automatic upstream retries for those paths. This preserves a
+single public frontend origin without a cross-origin credential bridge. The
+existing replica count, affinity, disruption budget and rolling update capacity
+remain in place. Stateful applications must provide their own routing and
+reconnection policy; enabling this runtime does not make in-memory state durable.
+
 **CARS Node** is the backend runtime system for deploying and managing BSV Blockchain-based Overlay Services at scale in a cloud environment. It orchestrates Kubernetes clusters, billing, domain setup, SSL issuance, and application lifecycle management for your projects. Together with the **CARS CLI** and the **LARS** (Local Automated Runtime System) toolkit, CARS Node provides a seamless path from local development to production cloud deployment.
 
 If you’re familiar with the **[CARS CLI](https://github.com/bitcoin-sv/cars-cli)**, which developers use to build and deploy artifacts from their machines, then think of the **CARS Node** as its cloud counterpart—a dynamic environment that receives your deployments, provisions infrastructure, handles scaling, billing, and secure access to your running BSV Overlay Services.
@@ -389,3 +408,4 @@ exports hash-bound incremental registry content as an artifact; it does not depl
 or activate cluster builds. Network-ops owns registry promotion, exact cache
 qualification and the fenced release. Retire this exceptional path after a
 separately qualified full image supersedes it.
+

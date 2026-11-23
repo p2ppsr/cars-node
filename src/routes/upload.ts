@@ -1,3 +1,4 @@
+import { nodeApplicationRuntime, generateNodeEntrypoint, generateNodePackageJson, generateNodeDockerfile } from '../application-runtime';
 import { Request, Response } from 'express';
 import fs from 'fs-extra';
 import path from 'path';
@@ -325,6 +326,8 @@ export default async (req: Request, res: Response) => {
       throw new Error('CARS deploy targets are invalid');
     }
     const backendEnabled = deployTargets.includes('backend');
+    const nodeRuntime = backendEnabled ? nodeApplicationRuntime(deploymentInfo) : undefined;
+    const overlayBackendEnabled = backendEnabled && !nodeRuntime;
     const frontendEnabled = deployTargets.includes('frontend');
     // Frontend and backend containers share a Pod network namespace. Keep the
     // static server off the backend's fixed 8080 listener whenever both are
@@ -364,7 +367,7 @@ export default async (req: Request, res: Response) => {
       // Add minimal NGINX configuration for static serving
       fs.writeFileSync(
         path.join(frontendDir, 'nginx.conf'),
-        frontendNginxConfig(frontendPort, staticRouting)
+        frontendNginxConfig(frontendPort, staticRouting, nodeRuntime?.frontendProxy)
       );
 
       // Dockerfile for serving static files
@@ -408,6 +411,7 @@ EXPOSE ${frontendPort}`
 
       const backendPackageJson = readBoundedJson(backendPackageJsonPath, 'backend/package.json');
       const backendDependencies = validateDependencies(backendPackageJson.dependencies);
+      if (nodeRuntime && !fs.statSync(path.join(backendDir, nodeRuntime.entrypoint)).isFile()) throw new Error('Node entrypoint is missing');
 
       // Check if sCrypt contract compilation is needed
       let enableContracts = false;
@@ -426,16 +430,16 @@ EXPOSE ${frontendPort}`
       // Create supporting files for Docker build
       fs.writeFileSync(
         path.join(backendDir, 'Dockerfile'),
-        generateDockerfile(enableContracts)
+        nodeRuntime ? generateNodeDockerfile() : generateDockerfile(enableContracts)
       );
       fs.writeFileSync(path.join(backendDir, 'wait-for-services.sh'), generateWaitScript());
       fs.writeFileSync(path.join(backendDir, 'safe-access-logger.cjs'), generateSafeAccessLoggerCjs());
       fs.writeFileSync(path.join(backendDir, 'tsconfig.json'), generateTsConfig());
       fs.writeFileSync(
         path.join(backendDir, 'package.json'),
-        JSON.stringify(generatePackageJson(backendDependencies), null, 2)
+        JSON.stringify(nodeRuntime ? generateNodePackageJson(backendDependencies) : generatePackageJson(backendDependencies), null, 2)
       );
-      fs.writeFileSync(path.join(backendDir, 'index.ts'), generateIndexTs(deploymentInfo));
+      fs.writeFileSync(path.join(backendDir, 'index.ts'), nodeRuntime ? generateNodeEntrypoint(nodeRuntime) : generateIndexTs(deploymentInfo));
 
       // Build + push in the isolated, tokenless build sidecar.
       backendImage = await buildProjectImage({
@@ -505,11 +509,11 @@ description: A chart to deploy a CARS project
     const namespace = `cars-project-${project.project_uuid}`;
     const helmReleaseName = `cars-project-${project.project_uuid.substr(0, 24)}`;
     const projectDbMode = getProjectDbMode();
-    const useMySQL = backendEnabled && projectDbMode === 'legacy-per-project';
-    const useMongo = backendEnabled && projectDbMode === 'legacy-per-project';
+    const useMySQL = overlayBackendEnabled && projectDbMode === 'legacy-per-project';
+    const useMongo = overlayBackendEnabled && projectDbMode === 'legacy-per-project';
     let sharedDbCredentials: ProjectDbCredentials | undefined;
 
-    if (backendEnabled && projectDbMode === 'shared') {
+    if (overlayBackendEnabled && projectDbMode === 'shared') {
       const existingSecret = readProjectDbSecret(namespace, `${helmReleaseName}-db-connection`);
       if (!existingSecret) {
         const previousSuccessfulDeploy = await db('deploys')
@@ -530,6 +534,7 @@ description: A chart to deploy a CARS project
     // Values for the chart
     const valuesObj = {
       backendImage,
+      nodeRuntime: !!nodeRuntime,
       frontendImage,
       frontendPort,
       ingressHostFrontend: `frontend.${ingressHost}`,
@@ -568,12 +573,12 @@ description: A chart to deploy a CARS project
 `
     );
 
-    if (backendEnabled && (!sharedDbCredentials || projectDbMode !== 'shared')) {
+    if (overlayBackendEnabled && (!sharedDbCredentials || projectDbMode !== 'shared')) {
       throw new Error('Secure shared database credentials were not provisioned');
     }
     fs.writeFileSync(
       path.join(helmDir, 'templates', 'db-secrets.yaml'),
-      backendEnabled && sharedDbCredentials
+      overlayBackendEnabled && sharedDbCredentials
         ? `{{- if .Values.backendImage }}
 apiVersion: v1
 kind: Secret
@@ -605,7 +610,7 @@ metadata:
     app: {{ include "cars-project.fullname" . }}
 spec:
   replicas: {{ .Values.appReplicas }}
-  {{- if and .Values.frontendImage (not .Values.backendImage) }}
+  {{- if or .Values.nodeRuntime (and .Values.frontendImage (not .Values.backendImage)) }}
   minReadySeconds: 10
   {{- end }}
   strategy:
@@ -623,7 +628,7 @@ spec:
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
-      {{- if and .Values.frontendImage (not .Values.backendImage) }}
+      {{- if or .Values.nodeRuntime (and .Values.frontendImage (not .Values.backendImage)) }}
       terminationGracePeriodSeconds: 60
       {{- end }}
       securityContext:
@@ -663,6 +668,7 @@ spec:
             matchLabels:
               app: {{ include "cars-project.fullname" . }}
       {{- if .Values.backendImage }}
+      {{- if not .Values.nodeRuntime }}
       initContainers:
       - name: wait-for-mysql
         image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
@@ -711,6 +717,7 @@ spec:
             cpu: 100m
             memory: 64Mi
       {{- end }}
+      {{- end }}
       containers:
       {{- if .Values.backendImage }}
       - name: backend
@@ -725,6 +732,7 @@ spec:
         env:
         - name: HOSTING_URL
           value: "{{ .Values.ingressHostBackend }}"
+        {{- if not .Values.nodeRuntime }}
         - name: REQUEST_LOGGING
           value: ${yamlString(requestLoggingEnv)}
         - name: SAFE_REQUEST_LOGGING
@@ -776,6 +784,7 @@ ${propagationProviderEnv}        - name: KNEX_URL
         - name: SYNC_CONFIG_JSON
           value: |-
             ${syncConfigJson}
+        {{- end }}
         ports:
         - containerPort: 8080
         startupProbe:
@@ -1478,7 +1487,7 @@ spec:
     // The release itself is the source of truth for the capabilities the node
     // advertises. Only publish registry changes after the new backend is ready.
     let deployedCapabilities = { topicManagers: [] as string[], lookupServices: [] as string[] };
-    if (backendEnabled) {
+    if (overlayBackendEnabled) {
       const internalBackendUrl = `http://${helmReleaseName}-service.${namespace}.svc.cluster.local:8080`;
       deployedCapabilities = await inspectProjectCapabilities(internalBackendUrl);
       const expectedTopics = Object.keys(deploymentInfo.topicManagers || {});

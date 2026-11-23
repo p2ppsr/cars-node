@@ -1,3 +1,5 @@
+import { validateFrontendProxyPaths } from './application-runtime';
+
 export interface StaticRouting {
   version: 1;
   mode: 'static';
@@ -17,10 +19,24 @@ export function validateStaticRouting(value: unknown): StaticRouting {
   return config;
 }
 
-export function frontendNginxConfig(frontendPort: number, routing?: StaticRouting): string {
+export function frontendNginxConfig(frontendPort: number, routing?: StaticRouting, proxyPaths: string[] = []): string {
   if (routing) validateStaticRouting(routing);
+  validateFrontendProxyPaths(proxyPaths);
+  const proxyLocations = proxyPaths.map(path => `    location ${path.endsWith('/') ? '^~ ' : '= '}${path} {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $cars_connection_upgrade;
+        proxy_read_timeout 21600s;
+        proxy_send_timeout 21600s;
+        proxy_buffering off;
+        proxy_next_upstream off;
+        access_log off;
+    }`).join('\n');
+  const upgradeMap = proxyPaths.length ? "map $http_upgrade $cars_connection_upgrade { default upgrade; '' close; }\n" : '';
   const redirects = Object.entries(routing?.redirects || {}).map(([source, destination]) => `    location = ${source} { return 301 ${destination}; }`).join('\n');
-  return `server {
+  return `${upgradeMap}server {
     listen ${frontendPort};
     server_name localhost;
     root /usr/share/nginx/html;
@@ -55,6 +71,7 @@ export function frontendNginxConfig(frontendPort: number, routing?: StaticRoutin
         try_files $uri =404;
     }
 
+    ${proxyLocations}
     ${redirects}
     ${routing ? "error_page 404 /404.html;" : ""}
 
@@ -67,3 +84,4 @@ export function frontendNginxConfig(frontendPort: number, routing?: StaticRoutin
     }
 }`;
 }
+
